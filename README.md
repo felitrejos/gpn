@@ -37,7 +37,7 @@ If you would rather do it yourself, AGENTS.md reads fine as human
 instructions. The short version:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/gpn.git
+git clone https://github.com/felitrejos/gpn.git
 cd gpn && ./install.sh -t "Work VPN"
 $EDITOR ~/.config/gpn/default.conf
 gpn test-auth
