@@ -1,7 +1,7 @@
 # Agent guide
 
 Setup runbook for an AI agent. The user will say something like *"read
-AGENTS.md and set up gpconnect for my VPN."*
+AGENTS.md and set up gpn for my VPN."*
 
 The work is mostly discovery: the portal hostname, the exact username format,
 whether a client certificate is involved, and how the portal wants the 2FA
@@ -14,7 +14,7 @@ already on disk.
    file. To check a secret is readable, print its length, not its value.
 2. **Never put a secret in the config.** The config references the password
    manager; it does not store secrets.
-3. **Never commit a `.conf`.** Real profiles live in `~/.config/gpconnect/`.
+3. **Never commit a `.conf`.** Real profiles live in `~/.config/gpn/`.
    `.gitignore` blocks `*.conf` — leave that alone.
 4. **Do not retry failed logins in a loop.** Institutional portals lock
    accounts. Two failures, then stop and report.
@@ -127,9 +127,9 @@ and confirm with the user.
 ## 6. Write the config
 
 ```bash
-mkdir -p ~/.config/gpconnect && chmod 700 ~/.config/gpconnect
-cp config.example ~/.config/gpconnect/default.conf
-chmod 600 ~/.config/gpconnect/default.conf
+mkdir -p ~/.config/gpn && chmod 700 ~/.config/gpn
+cp config.example ~/.config/gpn/default.conf
+chmod 600 ~/.config/gpn/default.conf
 ```
 
 Fill in `PORTAL`, `VPN_USER`, `CREDENTIALS`, `OP_ITEM`, `GP_VERSION`. Leave
@@ -141,7 +141,7 @@ into it.
 ## 7. Verify the login
 
 ```bash
-gpconnect test-auth
+gpn test-auth
 ```
 
 Runs the full login with `--cookieonly`: no root, no tunnel, cookies redacted.
@@ -176,15 +176,15 @@ Raycast commands will not work.
 Then confirm it works:
 
 ```bash
-gpconnect connect && gpconnect status
-gpconnect disconnect
+gpn connect && gpn status
+gpn disconnect
 ```
 
-A good connect reports an IP. If not, `gpconnect logs 60`.
+A good connect reports an IP. If not, `gpn logs 60`.
 
 ## 9. Raycast
 
-`install.sh` writes the commands to `~/.config/gpconnect/raycast/`. Tell the
+`install.sh` writes the commands to `~/.config/gpn/raycast/`. Tell the
 user to add that directory under **Raycast → Settings → Extensions → Script
 Commands → Add Directory**, then give Toggle a hotkey.
 
@@ -192,14 +192,14 @@ Commands → Add Directory**, then give Toggle a hotkey.
 
 | Path | What it is |
 | --- | --- |
-| `gpconnect` | the whole tool, one bash script |
+| `gpn` | the whole tool, one bash script |
 | `config.example` | every config key, documented |
 | `install.sh` | symlink, config skeleton, sudoers rule, Raycast generation; `--uninstall` reverses it |
 | `raycast-templates/` | rendered per profile by `install.sh` |
 
-Runtime state, none of it in the repo: `~/.config/gpconnect/<profile>.conf`,
-`~/.config/gpconnect/raycast/`, `~/.local/state/gpconnect/` (pidfile, cached
-IP), `~/Library/Logs/gpconnect-<profile>.log`.
+Runtime state, none of it in the repo: `~/.config/gpn/<profile>.conf`,
+`~/.config/gpn/raycast/`, `~/.local/state/gpn/` (pidfile, cached
+IP), `~/Library/Logs/gpn-<profile>.log`.
 
 ## Easy things to get wrong
 

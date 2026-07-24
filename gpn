@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 #
-# gpconnect — connect to a Palo Alto GlobalProtect VPN with openconnect,
+# gpn — connect to a Palo Alto GlobalProtect VPN with openconnect,
 # pulling the password and 2FA code from a password manager.
 #
 # Built to replace the GlobalProtect GUI with something that can be toggled
 # from a launcher (Raycast, Alfred, a hotkey) in one keystroke.
 #
-# Configuration lives in  ~/.config/gpconnect/<profile>.conf
+# Configuration lives in  ~/.config/gpn/<profile>.conf
 # See config.example for every supported key.
 #
-# Usage: gpconnect [-p PROFILE] {connect|disconnect|toggle|status|test-auth|logs|profiles}
+# Usage: gpn [-p PROFILE] {connect|disconnect|toggle|status|test-auth|logs|profiles}
 
 set -uo pipefail
 
 PROGRAM="${0##*/}"
 VERSION="1.0.0"
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gpconnect"
-PROFILE="${GPCONNECT_PROFILE:-default}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gpn"
+PROFILE="${GPN_PROFILE:-default}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -89,7 +89,7 @@ load_config() {
     VPNC_SCRIPT="$(find_vpnc_script)" \
         || die "vpnc-script not found. Set VPNC_SCRIPT in $CONFIG_FILE."
 
-    STATEDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gpconnect"
+    STATEDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gpn"
     if [[ -d "$HOME/Library/Logs" ]]; then
         LOGDIR="$HOME/Library/Logs"
     else
@@ -100,8 +100,8 @@ load_config() {
     # The pidfile lives in a directory we own, not /var/run. openconnect runs
     # as root and writes it, but deleting a stale one is governed by the
     # directory's permissions — so cleanup never needs sudo.
-    PIDFILE="$STATEDIR/gpconnect-$PROFILE.pid"
-    LOGFILE="$LOGDIR/gpconnect-$PROFILE.log"
+    PIDFILE="$STATEDIR/gpn-$PROFILE.pid"
+    LOGFILE="$LOGDIR/gpn-$PROFILE.log"
     IPFILE="$STATEDIR/$PROFILE.ip"
     touch "$LOGFILE" 2>/dev/null
 }

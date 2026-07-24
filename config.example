@@ -1,8 +1,8 @@
-# gpconnect profile
+# gpn profile
 #
-# Copy to ~/.config/gpconnect/default.conf and edit.
-# Extra profiles are just extra files: ~/.config/gpconnect/work.conf, used as
-#   gpconnect -p work connect
+# Copy to ~/.config/gpn/default.conf and edit.
+# Extra profiles are just extra files: ~/.config/gpn/work.conf, used as
+#   gpn -p work connect
 #
 # This file is sourced by bash, so it is shell syntax, and any value may be a
 # command substitution.
@@ -39,8 +39,8 @@ OP_ACCOUNT=""
 
 # --- CREDENTIALS="keychain" -------------------------------------------------
 # Create the entry with:
-#   security add-generic-password -s gpconnect -a "$VPN_USER" -w
-KEYCHAIN_SERVICE="gpconnect"
+#   security add-generic-password -s gpn -a "$VPN_USER" -w
+KEYCHAIN_SERVICE="gpn"
 
 # --- CREDENTIALS="cmd" ------------------------------------------------------
 # Anything that prints the secret on stdout. Examples:
@@ -52,7 +52,7 @@ PASSWORD_CMD=""
 OTP_CMD=""
 
 # ---------------------------------------------------------------------------
-# Auth shape — run `gpconnect test-auth` to find the right combination
+# Auth shape — run `gpn test-auth` to find the right combination
 # ---------------------------------------------------------------------------
 
 # How the portal wants the one-time code.

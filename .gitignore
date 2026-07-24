@@ -1,4 +1,4 @@
-# Never commit a real profile — configs live in ~/.config/gpconnect/
+# Never commit a real profile — configs live in ~/.config/gpn/
 *.conf
 !config.example
 

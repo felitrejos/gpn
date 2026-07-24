@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# gpconnect installer.
+# gpn installer.
 #
 #   ./install.sh                 install for the "default" profile
 #   ./install.sh -p work         install and generate Raycast commands for "work"
@@ -13,9 +13,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gpconnect"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gpn"
 RAYCAST_DIR="$CONFIG_DIR/raycast"
-SUDOERS="/etc/sudoers.d/gpconnect"
+SUDOERS="/etc/sudoers.d/gpn"
 USER_NAME="$(id -un)"
 
 PROFILE="default"
@@ -49,8 +49,8 @@ BINDIR="$(pick_bindir)"
 
 # --- uninstall ---------------------------------------------------------------
 if [[ $UNINSTALL -eq 1 ]]; then
-    say "Uninstalling gpconnect"
-    rm -f "$BINDIR/gpconnect" && echo "  removed $BINDIR/gpconnect"
+    say "Uninstalling gpn"
+    rm -f "$BINDIR/gpn" && echo "  removed $BINDIR/gpn"
     rm -rf "$RAYCAST_DIR"     && echo "  removed $RAYCAST_DIR"
     if [[ -e "$SUDOERS" ]]; then
         sudo rm -f "$SUDOERS" && echo "  removed $SUDOERS"
@@ -69,11 +69,11 @@ command -v openconnect >/dev/null || {
 OPENCONNECT="$(command -v openconnect)"
 REAL_OC="$(readlink -f "$OPENCONNECT" 2>/dev/null || printf '%s' "$OPENCONNECT")"
 
-chmod +x "$REPO/gpconnect"
+chmod +x "$REPO/gpn"
 
 # --- link --------------------------------------------------------------------
-say "Linking $BINDIR/gpconnect -> $REPO/gpconnect"
-ln -sf "$REPO/gpconnect" "$BINDIR/gpconnect"
+say "Linking $BINDIR/gpn -> $REPO/gpn"
+ln -sf "$REPO/gpn" "$BINDIR/gpn"
 case ":$PATH:" in
     *":$BINDIR:"*) ;;
     *) echo "  note: $BINDIR is not on your PATH — add it to your shell profile." ;;
@@ -106,11 +106,11 @@ if [[ $WANT_SUDOERS -eq 1 ]]; then
 
     tmp="$(mktemp)"
     {
-        echo "# gpconnect — start/stop the VPN without a password prompt."
+        echo "# gpn — start/stop the VPN without a password prompt."
         echo "$USER_NAME ALL=(root) NOPASSWD: $OPENCONNECT"
         [[ "$REAL_OC" != "$OPENCONNECT" ]] && echo "$USER_NAME ALL=(root) NOPASSWD: $REAL_OC"
         echo "$USER_NAME ALL=(root) NOPASSWD: /bin/kill"
-        echo "$USER_NAME ALL=(root) NOPASSWD: /bin/rm -f /var/run/gpconnect-*.pid"
+        echo "$USER_NAME ALL=(root) NOPASSWD: /bin/rm -f /var/run/gpn-*.pid"
     } >"$tmp"
 
     # Never install a sudoers file that does not parse.
@@ -130,10 +130,10 @@ if [[ -d /Applications/Raycast.app ]]; then
     say "Generating Raycast commands in $RAYCAST_DIR"
     for t in "$REPO"/raycast-templates/*.tmpl; do
         base="${t##*/}"; base="${base%.tmpl}"
-        out="$RAYCAST_DIR/gpconnect-$PROFILE-$base"
+        out="$RAYCAST_DIR/gpn-$PROFILE-$base"
         sed -e "s|__TITLE__|$TITLE|g" \
             -e "s|__PROFILE__|$PROFILE|g" \
-            -e "s|__BIN__|$BINDIR/gpconnect|g" \
+            -e "s|__BIN__|$BINDIR/gpn|g" \
             -e "s|__PATH__|$BINDIR:/usr/bin:/bin:/usr/sbin:/sbin|g" \
             "$t" >"$out"
         chmod +x "$out"
@@ -149,7 +149,7 @@ cat <<EOF
 Next:
   1. Edit  $CONFIG_FILE
   2. Check the auth flow (no root, no tunnel):
-       gpconnect -p $PROFILE test-auth
+       gpn -p $PROFILE test-auth
   3. Connect:
-       gpconnect -p $PROFILE connect
+       gpn -p $PROFILE connect
 EOF

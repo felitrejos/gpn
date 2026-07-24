@@ -1,4 +1,4 @@
-# gpconnect
+# gpn
 
 Raycast commands for connecting to a Palo Alto GlobalProtect VPN, with
 1Password filling in the password and the 2FA code.
@@ -27,7 +27,7 @@ it installed, but it is tedious to dig out by hand.
 [AGENTS.md](AGENTS.md) is a runbook for exactly that. Point your agent at it —
 Claude Code, Codex, Cursor, whichever you use:
 
-> Read AGENTS.md and set up gpconnect for my VPN.
+> Read AGENTS.md and set up gpn for my VPN.
 
 It reads the settings out of the installed client, checks your portal is
 compatible, finds your 1Password entry, writes the config, and verifies the
@@ -37,18 +37,18 @@ If you would rather do it yourself, AGENTS.md reads fine as human
 instructions. The short version:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/gpconnect.git
-cd gpconnect && ./install.sh -t "Work VPN"
-$EDITOR ~/.config/gpconnect/default.conf
-gpconnect test-auth
+git clone https://github.com/YOUR_USERNAME/gpn.git
+cd gpn && ./install.sh -t "Work VPN"
+$EDITOR ~/.config/gpn/default.conf
+gpn test-auth
 ```
 
-Then add `~/.config/gpconnect/raycast` under **Raycast → Settings → Extensions
+Then add `~/.config/gpn/raycast` under **Raycast → Settings → Extensions
 → Script Commands → Add Directory**, and give Toggle a hotkey.
 
 ## Configuration
 
-One file per VPN in `~/.config/gpconnect/`. The minimum:
+One file per VPN in `~/.config/gpn/`. The minimum:
 
 ```bash
 PORTAL="vpn.example.edu"
@@ -69,7 +69,7 @@ commands:
 
 ## Troubleshooting
 
-`gpconnect test-auth` runs the login without root and without creating a
+`gpn test-auth` runs the login without root and without creating a
 tunnel, then prints what happened with the cookies redacted. Start there.
 
 | Symptom | Fix |
@@ -79,7 +79,7 @@ tunnel, then prints what happened with the cookies redacted. Start there.
 | No code prompt at all | `OTP_MODE="none"` |
 | "use the latest version" nag | set `GP_VERSION` to match the real client |
 | Portal offers several gateways | `GATEWAY_MODE="0"` to let it choose |
-| Fails after login succeeds | `gpconnect logs 60` |
+| Fails after login succeeds | `gpn logs 60` |
 
 Portals often print their own banner mid-login, sometimes an alarming one,
 sometimes in another language. If `test-auth` ends with a `userauthcookie`, the
