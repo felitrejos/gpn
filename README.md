@@ -1,16 +1,42 @@
 # gpconnect
 
-Connect to a **Palo Alto GlobalProtect** VPN with [openconnect](https://www.infradead.org/openconnect/)
-instead of the official client, with the password and 2FA code pulled from your
-password manager — so connecting is one keystroke from Raycast rather than a
-GUI, a typed password, and a copy-pasted code.
+**Your GlobalProtect VPN as a Raycast toggle, with 1Password filling in the
+password and the 2FA code.**
+
+No GUI, no typed password, no copy-pasted six-digit code — one keystroke,
+connected. Underneath it is [openconnect](https://www.infradead.org/openconnect/)
+rather than the official client, which is what makes it fast.
 
 ```bash
-gpconnect connect      # or toggle / disconnect / status
+gpconnect toggle       # or connect / disconnect / status
 ```
 
-Built because the GlobalProtect app is slow to start, slow to connect, and
-insists on being clicked.
+1Password is the default, but any password manager with a CLI works — `pass`,
+macOS keychain, `ykman`, `oathtool`, anything that prints a secret to stdout.
+
+## Setup, done by your AI
+
+The tedious part of a GlobalProtect setup is not connecting, it is working out
+*what your portal wants*: the exact username format, whether a client
+certificate is in play, and how it expects your one-time code. That information
+is already on your Mac if the official client works there — buried in property
+lists, cached certificates, and an undocumented prelogin endpoint.
+
+So the setup instructions in this repo are written for an agent, not for you:
+
+> **"Read AGENTS.md and set up gpconnect for my VPN."**
+
+Point Claude Code, Cursor, Codex, or whatever harness you use at the repo and
+it will read the settings out of the installed client, check whether your
+portal is even compatible, find your 1Password entry, write the config, and
+verify the handshake before touching anything.
+
+[AGENTS.md](AGENTS.md) is the guide it follows — including the rules that keep
+it from printing your password, committing your config, or hammering your
+account into a lockout. `CLAUDE.md` points there too.
+
+Prefer to do it yourself? [Finding your own settings](#finding-your-own-settings)
+below is the same procedure by hand.
 
 ## Why this exists
 
@@ -44,7 +70,14 @@ guessing.
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/gpconnect.git
-cd gpconnect && ./install.sh
+cd gpconnect
+```
+
+Then either hand it to your agent — *"read AGENTS.md and set this up for my
+VPN"* — or carry on manually:
+
+```bash
+./install.sh
 ```
 
 The installer symlinks `gpconnect` onto your PATH, writes a config skeleton to
@@ -208,6 +241,8 @@ leaving them mangled.
   for secrets is your password manager — reference it, do not inline it.
 - `test-auth` redacts auth cookies from its output.
 
-## License
+## Contributing
 
-MIT
+Tested against one institutional portal. GlobalProtect deployments vary a lot,
+so if `test-auth` uncovers a shape this does not handle, the trace it prints
+(cookies already redacted) is exactly what an issue needs.
