@@ -1,0 +1,7 @@
+# Never commit a real profile — configs live in ~/.config/gpconnect/
+*.conf
+!config.example
+
+.DS_Store
+*.log
+*.swp

@@ -1,0 +1,90 @@
+# gpconnect profile
+#
+# Copy to ~/.config/gpconnect/default.conf and edit.
+# Extra profiles are just extra files: ~/.config/gpconnect/work.conf, used as
+#   gpconnect -p work connect
+#
+# This file is sourced by bash, so it is shell syntax, and any value may be a
+# command substitution.
+
+# ---------------------------------------------------------------------------
+# Required
+# ---------------------------------------------------------------------------
+
+# The GlobalProtect portal hostname, without https://
+PORTAL="vpn.example.edu"
+
+# Your VPN username. Many portals want it bare, without an @domain suffix —
+# check what the GlobalProtect app itself stored (see README, "Finding your
+# settings").
+VPN_USER="jdoe"
+
+# ---------------------------------------------------------------------------
+# Where the password and 2FA code come from
+# ---------------------------------------------------------------------------
+
+# op       — 1Password CLI
+# keychain — macOS keychain for the password, OTP_CMD for the code
+# cmd      — arbitrary commands (any password manager)
+# prompt   — type them in; openconnect asks. Cannot be driven from a launcher.
+CREDENTIALS="op"
+
+# --- CREDENTIALS="op" -------------------------------------------------------
+# The item's id or exact title. `op item list` to find it.
+OP_ITEM=""
+# Field holding the password, if it is not the standard one.
+OP_PASSWORD_FIELD="password"
+# Only needed if you are signed in to more than one 1Password account.
+OP_ACCOUNT=""
+
+# --- CREDENTIALS="keychain" -------------------------------------------------
+# Create the entry with:
+#   security add-generic-password -s gpconnect -a "$VPN_USER" -w
+KEYCHAIN_SERVICE="gpconnect"
+
+# --- CREDENTIALS="cmd" ------------------------------------------------------
+# Anything that prints the secret on stdout. Examples:
+#   PASSWORD_CMD='pass show vpn/example'
+#   OTP_CMD='pass otp vpn/example'
+#   OTP_CMD='oathtool --totp -b "$(pass show vpn/totp-secret)"'
+#   OTP_CMD='ykman oath accounts code -s vpn'
+PASSWORD_CMD=""
+OTP_CMD=""
+
+# ---------------------------------------------------------------------------
+# Auth shape — run `gpconnect test-auth` to find the right combination
+# ---------------------------------------------------------------------------
+
+# How the portal wants the one-time code.
+#   challenge — password first, then the code as a separate prompt (most common)
+#   append    — code glued onto the end of the password in one field
+#   none      — no second factor
+OTP_MODE="challenge"
+
+# 1 = authenticate straight to the gateway (/ssl-vpn/)
+# 0 = go through the portal first (/global-protect/)
+#
+# Leave this at 1 unless you know you need otherwise. On many deployments the
+# portal and the gateway authenticate *separately*, so going through the portal
+# asks for the password and a fresh code twice — and a TOTP code cannot be
+# replayed. Set 0 only if your portal fronts several gateways and you need it
+# to pick one.
+GATEWAY_MODE="1"
+
+# ---------------------------------------------------------------------------
+# Optional
+# ---------------------------------------------------------------------------
+
+# Report a specific GlobalProtect client version. Some portals nag or refuse if
+# the version looks too old. Copy whatever the real client reports.
+GP_VERSION=""
+
+# OS openconnect claims to be: linux, linux-64, win, mac-intel, android, apple-ios
+OS_TYPE="mac-intel"
+
+# Extra openconnect flags, word-split. e.g. "--no-dtls --mtu=1400"
+OPENCONNECT_EXTRA=""
+
+# Override autodetection if needed.
+OPENCONNECT_BIN=""
+VPNC_SCRIPT=""

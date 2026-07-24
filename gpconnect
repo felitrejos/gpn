@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+#
+# gpconnect — connect to a Palo Alto GlobalProtect VPN with openconnect,
+# pulling the password and 2FA code from a password manager.
+#
+# Built to replace the GlobalProtect GUI with something that can be toggled
+# from a launcher (Raycast, Alfred, a hotkey) in one keystroke.
+#
+# Configuration lives in  ~/.config/gpconnect/<profile>.conf
+# See config.example for every supported key.
+#
+# Usage: gpconnect [-p PROFILE] {connect|disconnect|toggle|status|test-auth|logs|profiles}
+
+set -uo pipefail
+
+PROGRAM="${0##*/}"
+VERSION="1.0.0"
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gpconnect"
+PROFILE="${GPCONNECT_PROFILE:-default}"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+die()  { printf '%s: %s\n' "$PROGRAM" "$*" >&2; exit 1; }
+warn() { printf '%s: %s\n' "$PROGRAM" "$*" >&2; }
+logf() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOGFILE" 2>/dev/null; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Locate openconnect's vpnc-script. Homebrew (Apple Silicon and Intel),
+# MacPorts and distro packages all put it somewhere different.
+find_vpnc_script() {
+    local c
+    for c in "${VPNC_SCRIPT:-}" \
+             /opt/homebrew/etc/vpnc/vpnc-script \
+             /usr/local/etc/vpnc/vpnc-script \
+             /opt/local/etc/vpnc/vpnc-script \
+             /etc/vpnc/vpnc-script \
+             /usr/share/vpnc-scripts/vpnc-script; do
+        [[ -n "$c" && -r "$c" ]] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+load_config() {
+    CONFIG_FILE="$CONFIG_DIR/$PROFILE.conf"
+    [[ -r "$CONFIG_FILE" ]] || die "no config for profile '$PROFILE'. Expected $CONFIG_FILE (copy config.example to start)."
+
+    # Defaults, then let the profile override them.
+    PORTAL=""
+    VPN_USER=""
+    CREDENTIALS="op"
+    OP_ITEM=""
+    OP_PASSWORD_FIELD="password"
+    OP_ACCOUNT=""
+    KEYCHAIN_SERVICE=""
+    PASSWORD_CMD=""
+    OTP_CMD=""
+    OTP_MODE="challenge"
+    GATEWAY_MODE="1"
+    GP_VERSION=""
+    OS_TYPE="mac-intel"
+    OPENCONNECT_EXTRA=""
+    OPENCONNECT_BIN=""
+    VPNC_SCRIPT=""
+
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE" || die "could not read $CONFIG_FILE"
+
+    [[ -n "$PORTAL"   ]] || die "PORTAL is not set in $CONFIG_FILE"
+    [[ -n "$VPN_USER" ]] || die "VPN_USER is not set in $CONFIG_FILE"
+
+    case "$OTP_MODE" in challenge|append|none) ;; *)
+        die "OTP_MODE must be challenge, append or none (got '$OTP_MODE')" ;;
+    esac
+    case "$CREDENTIALS" in op|keychain|cmd|prompt) ;; *)
+        die "CREDENTIALS must be op, keychain, cmd or prompt (got '$CREDENTIALS')" ;;
+    esac
+
+    OPENCONNECT_BIN="${OPENCONNECT_BIN:-$(command -v openconnect || true)}"
+    [[ -x "$OPENCONNECT_BIN" ]] || die "openconnect not found. Install it, or set OPENCONNECT_BIN in $CONFIG_FILE."
+
+    VPNC_SCRIPT="$(find_vpnc_script)" \
+        || die "vpnc-script not found. Set VPNC_SCRIPT in $CONFIG_FILE."
+
+    STATEDIR="${XDG_STATE_HOME:-$HOME/.local/state}/gpconnect"
+    if [[ -d "$HOME/Library/Logs" ]]; then
+        LOGDIR="$HOME/Library/Logs"
+    else
+        LOGDIR="$STATEDIR"
+    fi
+    mkdir -p "$LOGDIR" "$STATEDIR" 2>/dev/null
+
+    # The pidfile lives in a directory we own, not /var/run. openconnect runs
+    # as root and writes it, but deleting a stale one is governed by the
+    # directory's permissions — so cleanup never needs sudo.
+    PIDFILE="$STATEDIR/gpconnect-$PROFILE.pid"
+    LOGFILE="$LOGDIR/gpconnect-$PROFILE.log"
+    IPFILE="$STATEDIR/$PROFILE.ip"
+    touch "$LOGFILE" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+
+get_password() {
+    case "$CREDENTIALS" in
+        op)
+            have op || die "1Password CLI (op) not found."
+            [[ -n "$OP_ITEM" ]] || die "OP_ITEM is not set in $CONFIG_FILE"
+            local -a a=(item get "$OP_ITEM" --fields "label=$OP_PASSWORD_FIELD" --reveal)
+            [[ -n "$OP_ACCOUNT" ]] && a+=(--account "$OP_ACCOUNT")
+            op "${a[@]}" 2>/dev/null
+            ;;
+        keychain)
+            [[ -n "$KEYCHAIN_SERVICE" ]] || die "KEYCHAIN_SERVICE is not set in $CONFIG_FILE"
+            security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$VPN_USER" -w 2>/dev/null
+            ;;
+        cmd)
+            [[ -n "$PASSWORD_CMD" ]] || die "PASSWORD_CMD is not set in $CONFIG_FILE"
+            eval "$PASSWORD_CMD" 2>/dev/null
+            ;;
+    esac
+}
+
+get_otp() {
+    case "$CREDENTIALS" in
+        op)
+            local -a a=(item get "$OP_ITEM" --otp)
+            [[ -n "$OP_ACCOUNT" ]] && a+=(--account "$OP_ACCOUNT")
+            op "${a[@]}" 2>/dev/null
+            ;;
+        keychain|cmd)
+            [[ -n "$OTP_CMD" ]] || die "OTP_CMD is not set in $CONFIG_FILE (needed when OTP_MODE is not 'none')"
+            eval "$OTP_CMD" 2>/dev/null
+            ;;
+    esac
+}
+
+# Assemble the stdin stream openconnect consumes. It reads each auth prompt
+# with fgets(stdin) when stdin is not a tty, so it is one line per prompt.
+build_creds() {
+    local pass otp
+    pass="$(get_password)" || die "could not read the password (CREDENTIALS=$CREDENTIALS)"
+    [[ -n "$pass" ]] || die "the password source returned nothing (CREDENTIALS=$CREDENTIALS)"
+
+    if [[ "$OTP_MODE" == "none" ]]; then
+        printf '%s\n' "$pass"
+        return 0
+    fi
+
+    otp="$(get_otp)" || die "could not read the one-time code"
+    [[ -n "$otp" ]] || die "the OTP source returned nothing"
+
+    case "$OTP_MODE" in
+        challenge) printf '%s\n%s\n' "$pass" "$otp" ;;
+        append)    printf '%s%s\n'   "$pass" "$otp" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Tunnel state
+# ---------------------------------------------------------------------------
+
+vpn_pid() {
+    [[ -r "$PIDFILE" ]] || return 1
+    local pid; pid=$(<"$PIDFILE")
+    [[ -n "$pid" ]] || return 1
+    ps -p "$pid" -o comm= 2>/dev/null | grep -q openconnect || return 1
+    printf '%s' "$pid"
+}
+
+is_connected() { vpn_pid >/dev/null 2>&1; }
+
+# Once the tunnel is up openconnect announces the address it was given. The
+# wording depends on the tunnel type — "Configured as <ip>" for a GlobalProtect
+# ESP tunnel, "Connected as <ip>" for a plain SSL one — so accept both. Reading
+# it back is portable, unlike guessing at an address range.
+parse_assigned_ip() {
+    grep -oE '(Connected|Configured) as [0-9a-fA-F.:]+' "$LOGFILE" 2>/dev/null \
+        | tail -n1 | awk '{print $3}' | tr -d ','
+}
+
+# Prefer the value cached at connect time, but fall back to the log so status
+# still works if the cache was lost.
+assigned_ip() {
+    local ip=""
+    [[ -r "$IPFILE" ]] && ip="$(tr -d '\n' <"$IPFILE")"
+    [[ -z "$ip" ]] && ip="$(parse_assigned_ip)"
+    [[ -n "$ip" ]] || return 1
+    printf '%s' "$ip"
+}
+
+tun_iface() {
+    local ip i
+    ip="$(assigned_ip)" || return 1
+    [[ -n "$ip" ]] || return 1
+    for i in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E '^(utun|tun|ppp)'); do
+        ifconfig "$i" 2>/dev/null | grep -qF " $ip " && { printf '%s' "$i"; return 0; }
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+openconnect_args() {
+    local -a a=(
+        --protocol=gp
+        --user="$VPN_USER"
+        --os="$OS_TYPE"
+        --script="$VPNC_SCRIPT"
+    )
+    [[ -n "$GP_VERSION"      ]] && a+=(--version-string="$GP_VERSION")
+    [[ "$GATEWAY_MODE" == "1" ]] && a+=(--usergroup=gateway)
+    # shellcheck disable=SC2206
+    [[ -n "$OPENCONNECT_EXTRA" ]] && a+=($OPENCONNECT_EXTRA)
+    printf '%s\n' "${a[@]}"
+}
+
+cmd_connect() {
+    if is_connected; then
+        local cur; cur="$(assigned_ip)"
+        echo "Already connected${cur:+ — $cur}"
+        return 0
+    fi
+
+    rm -f "$PIDFILE" 2>/dev/null
+
+    local -a args
+    IFS=$'\n' read -r -d '' -a args < <(openconnect_args && printf '\0')
+    args+=(--background --pid-file="$PIDFILE")
+
+    logf "connect attempt (profile=$PROFILE otp_mode=$OTP_MODE gateway_mode=$GATEWAY_MODE)"
+    echo "Connecting to $PORTAL as $VPN_USER…"
+
+    local rc
+    if [[ "$CREDENTIALS" == "prompt" ]]; then
+        # Let openconnect do its own prompting on the terminal.
+        sudo "$OPENCONNECT_BIN" "${args[@]}" "$PORTAL" 2>&1 | tee -a "$LOGFILE"
+        rc=${PIPESTATUS[0]}
+    else
+        local creds; creds="$(build_creds)" || exit 1
+        printf '%s\n' "$creds" \
+            | sudo "$OPENCONNECT_BIN" "${args[@]}" --passwd-on-stdin "$PORTAL" >>"$LOGFILE" 2>&1
+        rc=$?
+        unset creds
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        local i ip
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            is_connected && { ip="$(parse_assigned_ip)"; [[ -n "$ip" ]] && break; }
+            sleep 0.5
+        done
+        if is_connected; then
+            ip="$(parse_assigned_ip)"
+            [[ -n "$ip" ]] && printf '%s' "$ip" >"$IPFILE"
+            echo "Connected${ip:+ — $ip}"
+            logf "connected${ip:+ ($ip)}"
+            return 0
+        fi
+    fi
+
+    logf "connect failed (rc=$rc)"
+    echo "Connection failed. Last lines of $LOGFILE:" >&2
+    tail -n 15 "$LOGFILE" >&2
+    return 1
+}
+
+cmd_disconnect() {
+    local pid
+    if ! pid=$(vpn_pid); then
+        echo "Not connected"
+        rm -f "$PIDFILE" 2>/dev/null
+        rm -f "$IPFILE" 2>/dev/null
+        return 0
+    fi
+
+    echo "Disconnecting…"
+    # SIGINT makes openconnect tear down cleanly and run vpnc-script with
+    # reason=disconnect, restoring the original DNS and routes.
+    sudo /bin/kill -INT "$pid" 2>/dev/null
+
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do is_connected || break; sleep 0.5; done
+    is_connected && { sudo /bin/kill -TERM "$pid" 2>/dev/null; sleep 1; }
+
+    rm -f "$PIDFILE" 2>/dev/null
+    rm -f "$IPFILE" 2>/dev/null
+    echo "Disconnected"
+    logf "disconnected"
+}
+
+cmd_toggle() { if is_connected; then cmd_disconnect; else cmd_connect; fi; }
+
+cmd_status() {
+    if is_connected; then
+        local ip iface
+        ip="$(assigned_ip)"; iface="$(tun_iface 2>/dev/null)"
+        echo "Connected${ip:+ — $ip}${iface:+ on $iface} (pid $(vpn_pid))"
+        return 0
+    fi
+    echo "Disconnected"
+    return 1
+}
+
+# Verify credentials and the whole auth handshake without root and without
+# bringing up a tunnel. This is the fastest way to work out the right OTP_MODE
+# and GATEWAY_MODE for a new portal.
+cmd_test_auth() {
+    echo "Testing authentication against $PORTAL (no tunnel will be created)…"
+    local -a args
+    IFS=$'\n' read -r -d '' -a args < <(openconnect_args && printf '\0')
+
+    local out
+    if [[ "$CREDENTIALS" == "prompt" ]]; then
+        out=$("$OPENCONNECT_BIN" "${args[@]}" --cookieonly "$PORTAL" 2>&1 >/dev/null)
+    else
+        local creds; creds="$(build_creds)" || exit 1
+        out=$(printf '%s\n' "$creds" \
+            | "$OPENCONNECT_BIN" "${args[@]}" --passwd-on-stdin --cookieonly "$PORTAL" 2>&1 >/dev/null)
+        unset creds
+    fi
+
+    # Never echo the cookie itself; only the trace on stderr.
+    printf '%s\n' "$out" | sed -E 's/(authcookie|prelogin-cookie|[a-z-]*userauthcookie)=[^&[:space:]]*/\1=<redacted>/g'
+
+    if printf '%s' "$out" | grep -q 'userauthcookie'; then
+        echo
+        echo "Authentication succeeded — OTP_MODE=$OTP_MODE, GATEWAY_MODE=$GATEWAY_MODE are correct."
+        return 0
+    fi
+    echo
+    echo "Authentication did not complete. Things to try:" >&2
+    echo "  * GATEWAY_MODE=1  if you were asked for the password or a code twice" >&2
+    echo "  * OTP_MODE=append if the code has to be glued onto the password" >&2
+    echo "  * OTP_MODE=none   if this portal has no second factor" >&2
+    return 1
+}
+
+cmd_logs() { tail -n "${1:-40}" "$LOGFILE"; }
+
+cmd_profiles() {
+    local f n
+    shopt -s nullglob
+    for f in "$CONFIG_DIR"/*.conf; do
+        n="${f##*/}"; n="${n%.conf}"
+        printf '%s%s\n' "$n" "$([[ "$n" == "$PROFILE" ]] && echo '  (default)')"
+    done
+    shopt -u nullglob
+}
+
+usage() {
+    cat <<EOF
+$PROGRAM $VERSION — GlobalProtect VPN via openconnect
+
+Usage: $PROGRAM [-p PROFILE] COMMAND
+
+Commands:
+  connect       Bring the tunnel up
+  disconnect    Tear the tunnel down
+  toggle        Connect if down, disconnect if up
+  status        Show tunnel state (exit 0 connected, 1 not)
+  test-auth     Verify credentials and auth flow, no tunnel, no root
+  logs [N]      Tail the last N log lines (default 40)
+  profiles      List configured profiles
+
+Config: $CONFIG_DIR/<profile>.conf
+EOF
+}
+
+# ---------------------------------------------------------------------------
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -p|--profile) PROFILE="${2:?--profile needs a value}"; shift 2 ;;
+        -h|--help)    usage; exit 0 ;;
+        -V|--version) echo "$PROGRAM $VERSION"; exit 0 ;;
+        *) break ;;
+    esac
+done
+
+CMD="${1:-status}"
+case "$CMD" in
+    connect|up)      load_config; cmd_connect ;;
+    disconnect|down) load_config; cmd_disconnect ;;
+    toggle)          load_config; cmd_toggle ;;
+    status)          load_config; cmd_status ;;
+    test-auth)       load_config; cmd_test_auth ;;
+    logs)            load_config; cmd_logs "${2:-40}" ;;
+    profiles)        cmd_profiles ;;
+    help)            usage ;;
+    *) usage >&2; exit 1 ;;
+esac
