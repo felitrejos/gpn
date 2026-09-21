@@ -240,7 +240,7 @@ cmd_connect() {
     args+=(--background --pid-file="$PIDFILE")
 
     logf "connect attempt (profile=$PROFILE otp_mode=$OTP_MODE gateway_mode=$GATEWAY_MODE)"
-    echo "Connecting to $PORTAL as $VPN_USER…"
+    echo "Connecting to $PORTAL as ${VPN_USER}…"
 
     local rc
     if [[ "$CREDENTIALS" == "prompt" ]]; then
