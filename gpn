@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 #
-# gpn — connect to a Palo Alto GlobalProtect VPN with openconnect,
-# pulling the password and 2FA code from a password manager.
+# gpn — connect to a Palo Alto GlobalProtect VPN with openconnect.
+#
+# The portal delegates authentication to an identity provider (Entra ID, Okta,
+# Shibboleth …). gpn runs that login in a window of its own, takes the
+# short-lived cookie the portal returns, and hands it to openconnect.
 #
 # Built to replace the GlobalProtect GUI with something that can be toggled
 # from a launcher (Raycast, Alfred, a hotkey) in one keystroke.
@@ -54,16 +57,8 @@ load_config() {
 
     # Defaults, then let the profile override them.
     PORTAL=""
-    VPN_USER=""
-    CREDENTIALS="op"
-    OP_ITEM=""
-    OP_PASSWORD_FIELD="password"
-    OP_ACCOUNT=""
-    KEYCHAIN_SERVICE=""
-    PASSWORD_CMD=""
-    OTP_CMD=""
-    OTP_MODE="challenge"
     GATEWAY_MODE="1"
+    SAML_TIMEOUT="300"
     GP_VERSION=""
     OS_TYPE="mac-intel"
     OPENCONNECT_EXTRA=""
@@ -73,15 +68,7 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONFIG_FILE" || die "could not read $CONFIG_FILE"
 
-    [[ -n "$PORTAL"   ]] || die "PORTAL is not set in $CONFIG_FILE"
-    [[ -n "$VPN_USER" ]] || die "VPN_USER is not set in $CONFIG_FILE"
-
-    case "$OTP_MODE" in challenge|append|none) ;; *)
-        die "OTP_MODE must be challenge, append or none (got '$OTP_MODE')" ;;
-    esac
-    case "$CREDENTIALS" in op|keychain|cmd|prompt) ;; *)
-        die "CREDENTIALS must be op, keychain, cmd or prompt (got '$CREDENTIALS')" ;;
-    esac
+    [[ -n "$PORTAL" ]] || die "PORTAL is not set in $CONFIG_FILE"
 
     OPENCONNECT_BIN="${OPENCONNECT_BIN:-$(command -v openconnect || true)}"
     [[ -x "$OPENCONNECT_BIN" ]] || die "openconnect not found. Install it, or set OPENCONNECT_BIN in $CONFIG_FILE."
@@ -104,65 +91,99 @@ load_config() {
     LOGFILE="$LOGDIR/gpn-$PROFILE.log"
     IPFILE="$STATEDIR/$PROFILE.ip"
     touch "$LOGFILE" 2>/dev/null
+
+    # Filled in by the sign-in; never configured.
+    VPN_USER=""
+    SAML_USERGROUP=""
+    SAML_COOKIE=""
+    SAML_FIFO="$STATEDIR/saml.fifo"
+    SAML_APP="${SAML_APP:-$HOME/Applications/GPNSamlLogin.app}"
 }
 
 # ---------------------------------------------------------------------------
-# Credentials
+# Sign-in
 # ---------------------------------------------------------------------------
+#
+# A GlobalProtect portal does not end SAML with a tidy redirect. It returns the
+# username and cookie in the HTTP response headers of the final page, or as an
+# XML fragment inside an HTML comment in that page's body — the one that renders
+# as a bare "authentication successful". Neither can be read from outside a
+# browser, which is why the login runs in GPNSamlLogin.app, a window that can
+# see its own responses. It keeps a persistent cookie jar, so an
+# identity-provider session carries across connects and most sign-ins need no
+# typing at all.
 
-get_password() {
-    case "$CREDENTIALS" in
-        op)
-            have op || die "1Password CLI (op) not found."
-            [[ -n "$OP_ITEM" ]] || die "OP_ITEM is not set in $CONFIG_FILE"
-            local -a a=(item get "$OP_ITEM" --fields "label=$OP_PASSWORD_FIELD" --reveal)
-            [[ -n "$OP_ACCOUNT" ]] && a+=(--account "$OP_ACCOUNT")
-            op "${a[@]}" 2>/dev/null
-            ;;
-        keychain)
-            [[ -n "$KEYCHAIN_SERVICE" ]] || die "KEYCHAIN_SERVICE is not set in $CONFIG_FILE"
-            security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$VPN_USER" -w 2>/dev/null
-            ;;
-        cmd)
-            [[ -n "$PASSWORD_CMD" ]] || die "PASSWORD_CMD is not set in $CONFIG_FILE"
-            eval "$PASSWORD_CMD" 2>/dev/null
-            ;;
-    esac
+# Ask the portal where to send the sign-in. No credentials involved; this is
+# the same unauthenticated probe openconnect makes.
+saml_request_url() {
+    local ep resp b64
+    if [[ "$GATEWAY_MODE" == "1" ]]; then ep="ssl-vpn"; else ep="global-protect"; fi
+
+    resp="$(curl -fsS --max-time 30 \
+        "https://$PORTAL/$ep/prelogin.esp?clientVer=4100&clientos=Mac" 2>/dev/null)" \
+        || die "could not reach $PORTAL to begin the sign-in"
+
+    b64="$(grep -o '<saml-request>[^<]*' <<<"$resp" | sed 's/<saml-request>//')"
+    [[ -n "$b64" ]] || die "$PORTAL did not offer a SAML sign-in. If it has switched back to a password prompt, gpn no longer supports it."
+
+    base64 -d <<<"$b64" 2>/dev/null || die "could not decode the sign-in request from $PORTAL"
 }
 
-get_otp() {
-    case "$CREDENTIALS" in
-        op)
-            local -a a=(item get "$OP_ITEM" --otp)
-            [[ -n "$OP_ACCOUNT" ]] && a+=(--account "$OP_ACCOUNT")
-            op "${a[@]}" 2>/dev/null
-            ;;
-        keychain|cmd)
-            [[ -n "$OTP_CMD" ]] || die "OTP_CMD is not set in $CONFIG_FILE (needed when OTP_MODE is not 'none')"
-            eval "$OTP_CMD" 2>/dev/null
-            ;;
-    esac
-}
+# Run the sign-in window. Returns "<username>\n<cookie-name>\n<cookie>".
+# Progress goes to stderr so it does not contaminate the result.
+saml_login() {
+    have curl || die "curl not found — needed for the sign-in."
+    local bin="$SAML_APP/Contents/MacOS/GPNSamlLogin"
+    [[ -x "$bin" ]] || die "the sign-in window is not installed. Run ./install.sh and try again."
 
-# Assemble the stdin stream openconnect consumes. It reads each auth prompt
-# with fgets(stdin) when stdin is not a tty, so it is one line per prompt.
-build_creds() {
-    local pass otp
-    pass="$(get_password)" || die "could not read the password (CREDENTIALS=$CREDENTIALS)"
-    [[ -n "$pass" ]] || die "the password source returned nothing (CREDENTIALS=$CREDENTIALS)"
+    local url; url="$(saml_request_url)" || exit 1
 
-    if [[ "$OTP_MODE" == "none" ]]; then
-        printf '%s\n' "$pass"
-        return 0
+    mkdir -p "$(dirname "$SAML_FIFO")" 2>/dev/null
+    rm -f "$SAML_FIFO"
+    mkfifo -m 600 "$SAML_FIFO" || die "could not create $SAML_FIFO"
+
+    # Read-write so open() returns immediately and a result that lands before
+    # we read is buffered in the pipe. The cookie never touches the filesystem.
+    exec 9<>"$SAML_FIFO"
+
+    echo "Signing in to ${PORTAL}…" >&2
+    GPN_SAML_FIFO="$SAML_FIFO" "$bin" "$url" >/dev/null 2>&1 &
+    local app_pid=$!
+
+    local un cname ck ok=1
+    if read -r -t "$SAML_TIMEOUT" -u 9 un \
+    && read -r -t "$SAML_TIMEOUT" -u 9 cname \
+    && read -r -t "$SAML_TIMEOUT" -u 9 ck; then
+        ok=0
     fi
 
-    otp="$(get_otp)" || die "could not read the one-time code"
-    [[ -n "$otp" ]] || die "the OTP source returned nothing"
+    exec 9>&-
+    rm -f "$SAML_FIFO"
+    kill "$app_pid" 2>/dev/null
+    wait "$app_pid" 2>/dev/null
 
-    case "$OTP_MODE" in
-        challenge) printf '%s\n%s\n' "$pass" "$otp" ;;
-        append)    printf '%s%s\n'   "$pass" "$otp" ;;
+    [[ $ok -eq 0 && -n "$un" && -n "$ck" ]] \
+        || die "the sign-in did not complete (window closed, or nothing returned within ${SAML_TIMEOUT}s)."
+    printf '%s\n%s\n%s\n' "$un" "$cname" "$ck"
+}
+
+# Publish the result into VPN_USER, SAML_USERGROUP and SAML_COOKIE. Call it
+# plainly — never in $( ) — or the assignments are lost with the subshell.
+saml_prepare() {
+    local out cname
+    out="$(saml_login)" || return 1
+    VPN_USER="$(sed -n 1p <<<"$out")"
+    cname="$(sed -n 2p <<<"$out")"
+    SAML_COOKIE="$(sed -n 3p <<<"$out")"
+
+    # Which cookie came back decides where it is spent.
+    case "$cname" in
+        prelogin-cookie)       SAML_USERGROUP="gateway:prelogin-cookie" ;;
+        portal-userauthcookie) SAML_USERGROUP="portal:portal-userauthcookie" ;;
+        *) die "the sign-in returned an unrecognised cookie type" ;;
     esac
+
+    [[ -n "$VPN_USER" && -n "$SAML_COOKIE" ]] || die "the sign-in returned nothing usable"
 }
 
 # ---------------------------------------------------------------------------
@@ -216,11 +237,11 @@ openconnect_args() {
     local -a a=(
         --protocol=gp
         --user="$VPN_USER"
+        --usergroup="$SAML_USERGROUP"
         --os="$OS_TYPE"
         --script="$VPNC_SCRIPT"
     )
-    [[ -n "$GP_VERSION"      ]] && a+=(--version-string="$GP_VERSION")
-    [[ "$GATEWAY_MODE" == "1" ]] && a+=(--usergroup=gateway)
+    [[ -n "$GP_VERSION" ]] && a+=(--version-string="$GP_VERSION")
     # shellcheck disable=SC2206
     [[ -n "$OPENCONNECT_EXTRA" ]] && a+=($OPENCONNECT_EXTRA)
     printf '%s\n' "${a[@]}"
@@ -235,25 +256,22 @@ cmd_connect() {
 
     rm -f "$PIDFILE" 2>/dev/null
 
+    # Must run first: it supplies the username and --usergroup below.
+    saml_prepare || exit 1
+
     local -a args
     IFS=$'\n' read -r -d '' -a args < <(openconnect_args && printf '\0')
     args+=(--background --pid-file="$PIDFILE")
 
-    logf "connect attempt (profile=$PROFILE otp_mode=$OTP_MODE gateway_mode=$GATEWAY_MODE)"
+    logf "connect attempt (profile=$PROFILE gateway_mode=$GATEWAY_MODE)"
     echo "Connecting to $PORTAL as ${VPN_USER}…"
 
+    # The cookie stands in for the password.
     local rc
-    if [[ "$CREDENTIALS" == "prompt" ]]; then
-        # Let openconnect do its own prompting on the terminal.
-        sudo "$OPENCONNECT_BIN" "${args[@]}" "$PORTAL" 2>&1 | tee -a "$LOGFILE"
-        rc=${PIPESTATUS[0]}
-    else
-        local creds; creds="$(build_creds)" || exit 1
-        printf '%s\n' "$creds" \
-            | sudo "$OPENCONNECT_BIN" "${args[@]}" --passwd-on-stdin "$PORTAL" >>"$LOGFILE" 2>&1
-        rc=$?
-        unset creds
-    fi
+    printf '%s\n' "$SAML_COOKIE" \
+        | sudo "$OPENCONNECT_BIN" "${args[@]}" --passwd-on-stdin "$PORTAL" >>"$LOGFILE" 2>&1
+    rc=$?
+    SAML_COOKIE=""
 
     if [[ $rc -eq 0 ]]; then
         local i ip
@@ -313,37 +331,36 @@ cmd_status() {
     return 1
 }
 
-# Verify credentials and the whole auth handshake without root and without
-# bringing up a tunnel. This is the fastest way to work out the right OTP_MODE
-# and GATEWAY_MODE for a new portal.
+# Run the whole sign-in and hand the cookie to the gateway, without root and
+# without bringing up a tunnel. Use it for every diagnostic step — never debug
+# by raising a real tunnel.
 cmd_test_auth() {
     echo "Testing authentication against $PORTAL (no tunnel will be created)…"
+
+    saml_prepare || exit 1
+
     local -a args
     IFS=$'\n' read -r -d '' -a args < <(openconnect_args && printf '\0')
 
     local out
-    if [[ "$CREDENTIALS" == "prompt" ]]; then
-        out=$("$OPENCONNECT_BIN" "${args[@]}" --cookieonly "$PORTAL" 2>&1 >/dev/null)
-    else
-        local creds; creds="$(build_creds)" || exit 1
-        out=$(printf '%s\n' "$creds" \
-            | "$OPENCONNECT_BIN" "${args[@]}" --passwd-on-stdin --cookieonly "$PORTAL" 2>&1 >/dev/null)
-        unset creds
-    fi
+    out=$(printf '%s\n' "$SAML_COOKIE" \
+        | "$OPENCONNECT_BIN" "${args[@]}" --passwd-on-stdin --cookieonly "$PORTAL" 2>&1 >/dev/null)
+    SAML_COOKIE=""
 
-    # Never echo the cookie itself; only the trace on stderr.
+    # Never echo a cookie; only the trace on stderr.
     printf '%s\n' "$out" | sed -E 's/(authcookie|prelogin-cookie|[a-z-]*userauthcookie)=[^&[:space:]]*/\1=<redacted>/g'
 
     if printf '%s' "$out" | grep -q 'userauthcookie'; then
         echo
-        echo "Authentication succeeded — OTP_MODE=$OTP_MODE, GATEWAY_MODE=$GATEWAY_MODE are correct."
+        echo "Authentication succeeded — signed in as $VPN_USER."
         return 0
     fi
+
     echo
-    echo "Authentication did not complete. Things to try:" >&2
-    echo "  * GATEWAY_MODE=1  if you were asked for the password or a code twice" >&2
-    echo "  * OTP_MODE=append if the code has to be glued onto the password" >&2
-    echo "  * OTP_MODE=none   if this portal has no second factor" >&2
+    echo "The sign-in worked but the gateway refused the cookie. Things to check:" >&2
+    echo "  * GATEWAY_MODE=0  to authenticate at the portal instead of the gateway" >&2
+    echo "  * whether your identity provider requires a managed or compliant" >&2
+    echo "    device, which blocks every client except the official one" >&2
     return 1
 }
 
@@ -370,7 +387,7 @@ Commands:
   disconnect    Tear the tunnel down
   toggle        Connect if down, disconnect if up
   status        Show tunnel state (exit 0 connected, 1 not)
-  test-auth     Verify credentials and auth flow, no tunnel, no root
+  test-auth     Verify the sign-in end to end, no tunnel, no root
   logs [N]      Tail the last N log lines (default 40)
   profiles      List configured profiles
 

@@ -3,59 +3,62 @@
 Setup runbook for an AI agent. The user will say something like *"read
 AGENTS.md and set up gpn for my VPN."*
 
-The work is mostly discovery: the portal hostname, the exact username format,
-whether a client certificate is involved, and how the portal wants the 2FA
-code. If the official GlobalProtect client works on this machine, all of it is
-already on disk.
+gpn handles GlobalProtect portals that authenticate through an identity
+provider. The work is mostly discovery: the portal hostname, confirming it
+really does use SAML, which client version it will accept, and whether a client
+certificate is involved. If the official GlobalProtect client works on this
+machine, much of it is already on disk.
 
 ## Rules
 
-1. **Never print a password or one-time code** — not to the terminal, not to a
-   file. To check a secret is readable, print its length, not its value.
-2. **Never put a secret in the config.** The config references the password
-   manager; it does not store secrets.
+1. **Never print a cookie or any other credential** — not to the terminal, not
+   to a file. To check one is present, print its length, not its value.
+2. **Never put a secret in the config.** A profile holds a hostname and a few
+   flags; nothing sensitive belongs in it.
 3. **Never commit a `.conf`.** Real profiles live in `~/.config/gpn/`.
    `.gitignore` blocks `*.conf` — leave that alone.
-4. **Do not retry failed logins in a loop.** Institutional portals lock
-   accounts. Two failures, then stop and report.
-5. **One-time codes are single-use and roll every 30s.** Wait for a fresh one
-   between attempts — a replayed code is rejected, which looks exactly like a
-   wrong setting.
-6. **Redact cookies** in anything you show. `authcookie`, `prelogin-cookie`
+4. **Do not retry failed logins in a loop.** Institutional identity providers
+   lock accounts, and repeated automated attempts are what risk-based policies
+   are watching for. Two failures, then stop and report.
+5. **Redact cookies** in anything you show. `authcookie`, `prelogin-cookie`
    and `*userauthcookie` values are live credentials.
-7. **Ask first** before removing the official client, hand-editing sudoers, or
+6. **Ask first** before removing the official client, hand-editing sudoers, or
    deleting configuration profiles.
+7. **The sign-in is the user's to perform.** Open the window and let them do
+   it. Never script credential entry into an identity provider: the markup
+   changes without notice, MFA blocks it anyway, and it trips exactly the
+   policies rule 4 is about.
 
 ## 1. Dependencies
 
 ```bash
-command -v openconnect op || brew install openconnect 1password-cli
-op account list        # confirms 1Password CLI integration is enabled
+command -v openconnect swiftc || brew install openconnect
+xcode-select -p   # swiftc comes from the command line tools
 ```
 
-Other credential backends are in `config.example` if the user does not use
-1Password.
+`swiftc` is not optional — it builds the sign-in window, which is the only way
+gpn authenticates.
 
 ## 2. Read the official client's settings
 
 ```bash
 plutil -convert xml1 -o - /Library/Preferences/com.paloaltonetworks.GlobalProtect.settings.plist
-plutil -convert xml1 -o - ~/Library/Preferences/com.paloaltonetworks.GlobalProtect.client.plist
 ```
 
 | Config key | Comes from |
 | --- | --- |
 | `PORTAL` | `PanSetup` → `Portal` |
 | `GP_VERSION` | `PanSetup` → `CurrentVersion` |
-| `VPN_USER` | client plist → `User` |
 
-If the client is not installed, ask the user for the portal and username.
+There is no username to read: the identity provider decides it, and the
+sign-in reports the name the gateway expects. If the client is not installed,
+ask the user for the portal hostname.
 
 `/Library/Logs/PaloAltoNetworks/GlobalProtect/PanGPS.log` holds gateway names
 and past assigned IPs, but only if the client connected recently. A log of
 nothing but startup lines means it has been disabled and will tell you nothing.
 
-## 3. Ask the portal how it authenticates
+## 3. Confirm the portal uses SAML
 
 No credentials needed, and the most informative single check:
 
@@ -63,11 +66,17 @@ No credentials needed, and the most informative single check:
 curl -s "https://PORTAL/global-protect/prelogin.esp?clientVer=4100&clientos=Mac"
 ```
 
-- **`<saml-request>` present** → SAML. **Stop.** This tool does not handle it;
-  point the user at [gp-saml-gui](https://github.com/dlenski/gp-saml-gui).
-- **Absent** → plain username + password. Continue.
-- **`<username-label>`** usually states the expected username format,
-  sometimes in the local language.
+- **`<saml-request>` present** → good, continue. The value is a base64-encoded
+  URL; decode it to see which identity provider you are dealing with.
+- **Absent** → this portal wants a plain username and password. gpn does not
+  support that; say so rather than improvising.
+- **`<username-label>`** hints at the expected identity, sometimes in the local
+  language. Worth reading: if it changed from a bare name to an email, the
+  portal migrated and any old config is stale.
+
+Ignore `<saml-default-browser>`. It advertises an agent preference, not what
+the portal's ACS actually returns, and it is `yes` on portals that never emit a
+`globalprotectcallback:` redirect. Never plan around it — see the last section.
 
 ## 4. Check for a client certificate
 
@@ -99,32 +108,7 @@ echo | openssl s_client -connect PORTAL:443 -servername PORTAL 2>&1 | grep "Veri
 `Pan*.dat` files are encrypted config caches — ignore them, openconnect fetches
 the same config at login.
 
-## 5. Find the credentials
-
-```bash
-op item list --format=json | python3 -c "
-import json,sys
-for i in json.load(sys.stdin):
-    t = i.get('title','')
-    if any(k in t.lower() for k in ['vpn','university','uni','work','portal']):
-        print(i['id'], '|', t)
-"
-```
-
-Confirm the right item with the user, then verify it has what is needed —
-**lengths only, never values**:
-
-```bash
-P=$(op item get ITEM_ID --fields label=password --reveal 2>&1)
-[ -n "$P" ] && echo "password: OK (${#P} chars)" || echo "password: FAILED"
-O=$(op item get ITEM_ID --otp 2>&1)
-[ -n "$O" ] && echo "otp: OK (${#O} digits)" || echo "otp: FAILED"
-```
-
-No OTP field may mean the portal has no second factor — set `OTP_MODE="none"`
-and confirm with the user.
-
-## 6. Write the config
+## 5. Write the config
 
 ```bash
 mkdir -p ~/.config/gpn && chmod 700 ~/.config/gpn
@@ -132,39 +116,20 @@ cp config.example ~/.config/gpn/default.conf
 chmod 600 ~/.config/gpn/default.conf
 ```
 
-Fill in `PORTAL`, `VPN_USER`, `CREDENTIALS`, `OP_ITEM`, `GP_VERSION`. Leave
-`OTP_MODE="challenge"` and `GATEWAY_MODE="1"`; step 7 confirms them.
+Fill in `PORTAL` and `GP_VERSION`. Leave `GATEWAY_MODE="1"`; step 7 confirms
+it. There is no username to set.
 
 The config is sourced by bash, so never drop unescaped user-pasted content
 into it.
 
-## 7. Verify the login
-
-```bash
-gpn test-auth
-```
-
-Runs the full login with `--cookieonly`: no root, no tunnel, cookies redacted.
-Use it for every diagnostic step — never debug by raising a real tunnel.
-
-| In the trace | Meaning | Action |
-| --- | --- | --- |
-| ends with `userauthcookie` | success | go to step 8 |
-| `Challenge:` then a code prompt | code is its own prompt | `OTP_MODE="challenge"` ✓ |
-| asked for password or code **twice** | portal and gateway both authenticate | `GATEWAY_MODE="1"` |
-| rejected, credentials known good | code may need appending | `OTP_MODE="append"` |
-| no code prompt | no second factor | `OTP_MODE="none"` |
-| `fgets (stdin)` error | it wanted an answer we did not supply | usually `GATEWAY_MODE="1"` |
-
-Portals print their own banners mid-login, sometimes alarming, sometimes in
-another language. They are not errors — if the trace ends with a
-`userauthcookie`, it worked. Change one setting at a time.
-
-## 8. Install
+## 6. Install
 
 ```bash
 ./install.sh -t "Work VPN"
 ```
+
+This builds `GPNSamlLogin.app` into `~/Applications`, so it has to happen
+before step 7 — there is no sign-in without it.
 
 Explain the tradeoff before running it and let the user decide: openconnect
 needs root for the tunnel, so the installer adds a passwordless sudo rule for
@@ -173,7 +138,31 @@ rule is effectively root for anything already running as this user.
 `--no-sudoers` skips it, but then every connect prompts for a password and the
 Raycast commands will not work.
 
-Then confirm it works:
+## 7. Verify the sign-in
+
+```bash
+gpn test-auth
+```
+
+Runs the whole sign-in and spends the cookie at the gateway with
+`--cookieonly`: no root, no tunnel, cookies redacted. Use it for every
+diagnostic step — never debug by raising a real tunnel.
+
+It opens a window, so the user has to be at the keyboard. Expect: window
+appears, they sign in, window closes itself, trace ends with a cookie.
+
+| In the trace | Meaning | Action |
+| --- | --- | --- |
+| ends with `userauthcookie` | success | go to step 8 |
+| window closed with nothing returned | cancelled, or the portal returned neither headers nor a comment | re-run; if it repeats, dump the final page and look for where the fields are |
+| cookie arrives, gateway refuses it | wrong endpoint for this cookie | `GATEWAY_MODE="0"` |
+| refused either way round | provider may demand a managed device | nothing to fix; report it |
+
+Portals print their own banners mid-login, sometimes alarming, sometimes in
+another language. They are not errors — if the trace ends with a
+`userauthcookie`, it worked. Change one setting at a time.
+
+Then confirm the tunnel:
 
 ```bash
 gpn connect && gpn status
@@ -182,7 +171,7 @@ gpn disconnect
 
 A good connect reports an IP. If not, `gpn logs 60`.
 
-## 9. Raycast
+## 8. Raycast
 
 `install.sh` writes the commands to `~/.config/gpn/raycast/`. Tell the
 user to add that directory under **Raycast → Settings → Extensions → Script
@@ -194,28 +183,57 @@ Commands → Add Directory**, then give Toggle a hotkey.
 | --- | --- |
 | `gpn` | the whole tool, one bash script |
 | `config.example` | every config key, documented |
-| `install.sh` | symlink, config skeleton, sudoers rule, Raycast generation; `--uninstall` reverses it |
+| `install.sh` | symlink, config skeleton, sudoers rule, sign-in window, Raycast generation; `--uninstall` reverses it |
+| `saml-handler/` | Swift source and build script for the sign-in window |
 | `raycast-templates/` | rendered per profile by `install.sh` |
 
 Runtime state, none of it in the repo: `~/.config/gpn/<profile>.conf`,
-`~/.config/gpn/raycast/`, `~/.local/state/gpn/` (pidfile, cached
-IP), `~/Library/Logs/gpn-<profile>.log`.
+`~/.config/gpn/raycast/`, `~/.local/state/gpn/` (pidfile, cached IP, the
+transient sign-in FIFO), `~/Library/Logs/gpn-<profile>.log`, and
+`~/Applications/GPNSamlLogin.app`.
 
 ## Easy things to get wrong
 
 From building this against a live portal:
 
-- **Portal vs gateway.** `/global-protect/` is the portal, `/ssl-vpn/` the
-  gateway. Many deployments authenticate at both, asking for the password and
-  a fresh code twice — and the second attempt fails, because a code cannot be
-  replayed. `GATEWAY_MODE="1"` skips the portal, which is why it is the
-  default.
+- **The portal does not hand back a callback URL.** It returns the username and
+  cookie in the HTTP response headers of the final page, or as an XML fragment
+  in an HTML comment in that page's body. A `globalprotectcallback:` redirect
+  is a third possibility that most portals never use — and `saml-default-browser:
+  yes` in prelogin does **not** mean they will. Building around the callback
+  costs a day and ends with a browser tab reading "authentication successful"
+  while nothing is listening.
+- **Which means the sign-in cannot happen in the user's own browser.** Nothing
+  outside a browser can read those response headers. That is the entire reason
+  the sign-in window exists, rather than shelling out to `open`.
+- **openconnect cannot do GlobalProtect SAML by itself.** It prints the
+  provider URL and gives up with `Failed to parse XML server response`. Its
+  `--external-browser` flag looks like the answer and is not — that is
+  AnyConnect's single-sign-on-external-browser method, a different protocol.
+- **gp-saml-gui is not an option on macOS.** It imports WebKit2Gtk at module
+  scope, and Homebrew's `webkitgtk` has no bottle and pulls `systemd`,
+  `libcap`, `wayland` and `libdrm` — a Linux-only formula. Do not start that
+  build; it cannot finish.
+- **Both prelogin endpoints offer SAML,** but they yield different cookies:
+  `/ssl-vpn/` returns `prelogin-cookie` (spend it with
+  `--usergroup=gateway:prelogin-cookie`), `/global-protect/` returns
+  `portal-userauthcookie` (`--usergroup=portal:portal-userauthcookie`).
+  `GATEWAY_MODE` picks the endpoint; the window reports which cookie came back.
+- **Open the FIFO read-write before launching the window.** Opening it
+  read-only blocks until a writer appears, and a result that lands before the
+  read is then buffered rather than lost.
 - **The tunnel-up message differs by tunnel type.** A GlobalProtect ESP tunnel
   logs `Configured as <ip>`; a plain SSL one logs `Connected as <ip>`. Parse
   both.
 - **Do not detect the tunnel by IP range.** Assigned ranges vary per
   institution. Read the address back from openconnect's own output.
 - **openconnect reads each prompt with `fgets(stdin)`** when stdin is not a
-  tty. That is why credentials are piped one line per prompt, and why an
-  unexpected extra prompt surfaces as a `fgets (stdin)` error rather than a
-  clear auth failure.
+  tty, which is why the cookie is piped as a single line.
+- **Always brace a `$VAR` that touches a non-ASCII character** — `${PORTAL}…`,
+  never `$PORTAL…`. macOS ships bash 3.2, which in a UTF-8 locale folds the
+  lead byte of the ellipsis into the identifier and looks up `PORTAL\xe2`;
+  `set -u` then aborts the moment that line runs. It parses clean, so
+  `bash -n` will not warn you, and it only fires when `LANG` is a UTF-8 locale
+  — so it can sit unnoticed for months and then appear to be a VPN problem.
+  This file is full of `…` and `—`; `install.sh` refuses to install a `gpn`
+  that has one, because it has been written twice already.

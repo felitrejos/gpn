@@ -8,13 +8,15 @@
 #   ./install.sh --uninstall     remove everything this script installed
 #
 # Installs: a symlink on your PATH, a config skeleton, a scoped sudoers rule,
-# and per-profile Raycast script commands.
+# the sign-in window, and per-profile Raycast script commands.
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gpn"
 RAYCAST_DIR="$CONFIG_DIR/raycast"
+SAML_APP_DIR="$HOME/Applications"
+SAML_APP="$SAML_APP_DIR/GPNSamlLogin.app"
 SUDOERS="/etc/sudoers.d/gpn"
 USER_NAME="$(id -un)"
 
@@ -52,6 +54,9 @@ if [[ $UNINSTALL -eq 1 ]]; then
     say "Uninstalling gpn"
     rm -f "$BINDIR/gpn" && echo "  removed $BINDIR/gpn"
     rm -rf "$RAYCAST_DIR"     && echo "  removed $RAYCAST_DIR"
+    if [[ -d "$SAML_APP" ]]; then
+        rm -rf "$SAML_APP" && echo "  removed $SAML_APP"
+    fi
     if [[ -e "$SUDOERS" ]]; then
         sudo rm -f "$SUDOERS" && echo "  removed $SUDOERS"
     fi
@@ -66,10 +71,30 @@ command -v openconnect >/dev/null || {
     echo "  apt install openconnect       # Debian/Ubuntu" >&2
     exit 1
 }
+command -v swiftc >/dev/null || {
+    echo "swiftc not found — needed to build the sign-in window." >&2
+    echo "  xcode-select --install" >&2
+    exit 1
+}
 OPENCONNECT="$(command -v openconnect)"
 REAL_OC="$(readlink -f "$OPENCONNECT" 2>/dev/null || printf '%s' "$OPENCONNECT")"
 
 chmod +x "$REPO/gpn"
+
+# Refuse to install a gpn that will die under a UTF-8 locale.
+#
+# macOS ships bash 3.2, which in a UTF-8 locale folds the lead byte of a
+# multibyte character into an identifier. So "$PORTAL…" is read as the variable
+# PORTAL\xe2, which is unset, and `set -u` turns that into a hard abort at the
+# moment the line runs — parsing it is clean, so `bash -n` sees nothing. Braces
+# fix it; this catches the ones that were forgotten.
+BAD="$(perl -ne 'print "  line $.: $_" if /\$\{?[A-Za-z_]\w*\}?(?<!\})[^\x00-\x7F]/' "$REPO/gpn")"
+if [[ -n "$BAD" ]]; then
+    echo "Refusing to install: unbraced \$VAR touching a non-ASCII character." >&2
+    echo "$BAD" >&2
+    echo "  Write \${VAR} there instead." >&2
+    exit 1
+fi
 
 # --- link --------------------------------------------------------------------
 say "Linking $BINDIR/gpn -> $REPO/gpn"
@@ -110,7 +135,6 @@ if [[ $WANT_SUDOERS -eq 1 ]]; then
         echo "$USER_NAME ALL=(root) NOPASSWD: $OPENCONNECT"
         [[ "$REAL_OC" != "$OPENCONNECT" ]] && echo "$USER_NAME ALL=(root) NOPASSWD: $REAL_OC"
         echo "$USER_NAME ALL=(root) NOPASSWD: /bin/kill"
-        echo "$USER_NAME ALL=(root) NOPASSWD: /bin/rm -f /var/run/gpn-*.pid"
     } >"$tmp"
 
     # Never install a sudoers file that does not parse.
@@ -122,6 +146,15 @@ if [[ $WANT_SUDOERS -eq 1 ]]; then
     rm -f "$tmp"
     sudo visudo -cqf "$SUDOERS" && echo "  installed and validated."
 fi
+
+# --- sign-in window ----------------------------------------------------------
+# The portal returns the cookie in the HTTP headers of the final page, which
+# only a browser we control can read — hence a small app of our own.
+say "Building the sign-in window"
+mkdir -p "$SAML_APP_DIR"
+# A leftover from an earlier layout; harmless, but no longer used.
+rm -rf "$SAML_APP_DIR/GPNSamlHandler.app" 2>/dev/null
+"$REPO/saml-handler/build.sh" "$SAML_APP_DIR"
 
 # --- raycast -----------------------------------------------------------------
 if [[ -d /Applications/Raycast.app ]]; then

@@ -5,3 +5,6 @@
 .DS_Store
 *.log
 *.swp
+
+# Built by saml-handler/build.sh (normally into ~/Applications)
+GPNSamlLogin.app/
