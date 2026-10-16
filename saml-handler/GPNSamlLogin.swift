@@ -20,6 +20,19 @@
 // cookie was returned, and its value. Which cookie it is decides openconnect's
 // --usergroup, so gpn has to be told rather than guess.
 //
+// The window starts hidden. With a saved identity-provider session the whole
+// exchange is redirects, so it usually finishes without ever showing — no
+// window, no stolen focus. It appears only when a person is needed: a page
+// with a visible field to type into, or `revealAfter` seconds without a
+// result (MFA prompts, banners, anything this cannot recognise).
+//
+// Two Entra ID pages that only ask "continue?" are answered automatically:
+// "Stay signed in?" gets Yes, so the next sign-in can be silent too, and
+// "Pick an account" with exactly one account picks it. Each is tried at most
+// once per run, only on login.microsoftonline.com, and only when its markers
+// match; anything else is left for the person. Nothing here ever types into
+// a page — usernames, passwords and codes are the person's to enter.
+//
 // Usage: GPNSamlLogin <saml-url>
 
 import Cocoa
@@ -31,6 +44,69 @@ let fifoPath = ProcessInfo.processInfo.environment["GPN_SAML_FIFO"]
     ?? (NSHomeDirectory() as NSString).appendingPathComponent(".local/state/gpn/saml.fifo")
 
 let cookieKeys = ["prelogin-cookie", "portal-userauthcookie"]
+
+// How long a silent sign-in may take before the window shows itself anyway.
+// An auto-answered Entra page restarts the clock, since it proves progress.
+let revealAfter: TimeInterval = 4
+// How often the hidden page is checked for something that wants a person.
+let pollEvery: TimeInterval = 0.5
+
+// Progress notes for debugging. gpn discards them; they never carry a URL,
+// a page's content or a cookie.
+func note(_ s: String) {
+    FileHandle.standardError.write("GPNSamlLogin: \(s)\n".data(using: .utf8)!)
+}
+
+// Classifies the current page. Returns:
+//   "input" — a visible field to type into, or several accounts to choose
+//             from: a person is needed now.
+//   "kmsi"  — Entra's "Stay signed in?" page.
+//   "pick"  — Entra's account picker with exactly one account.
+//   ""      — nothing recognisable; keep waiting.
+// Kept at column 0 inside a raw string so the source text is the script.
+let pageStateJS = #"""
+(() => {
+  const shown = e => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+  };
+  const typing = [...document.querySelectorAll(
+    'input:not([type]), input[type=text], input[type=email], input[type=password],' +
+    ' input[type=tel], input[type=number], textarea')].some(shown);
+  if (typing) return 'input';
+  if (location.hostname !== 'login.microsoftonline.com') return '';
+  if (document.getElementById('KmsiCheckboxField') && shown(document.getElementById('idSIButton9')))
+    return 'kmsi';
+  const tiles = [...document.querySelectorAll('#tilesHolder [data-test-id]')]
+    .filter(t => (t.getAttribute('data-test-id') || '').includes('@') && shown(t));
+  if (tiles.length === 1) return 'pick';
+  if (tiles.length > 1) return 'input';
+  return '';
+})()
+"""#
+
+// Answers a page pageStateJS recognised. Re-checks the same markers first and
+// does nothing if they no longer match. Clicks only — never fills a field.
+let answerJS = #"""
+(kind => {
+  if (location.hostname !== 'login.microsoftonline.com') return false;
+  if (kind === 'kmsi') {
+    const b = document.getElementById('idSIButton9');
+    if (!document.getElementById('KmsiCheckboxField') || !b) return false;
+    b.click();
+    return true;
+  }
+  if (kind === 'pick') {
+    const tiles = [...document.querySelectorAll('#tilesHolder [data-test-id]')]
+      .filter(t => (t.getAttribute('data-test-id') || '').includes('@'));
+    if (tiles.length !== 1) return false;
+    tiles[0].click();
+    return true;
+  }
+  return false;
+})
+"""#
 
 func isWanted(_ key: String) -> Bool {
     key.hasPrefix("saml-") || cookieKeys.contains(key)
@@ -65,6 +141,10 @@ func tagValue(_ name: String, in text: String) -> String? {
 final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private var found: [String: String] = [:]
     private var done = false
+    private var revealed = false
+    private var revealAt = Date().addingTimeInterval(revealAfter)
+    private var answered: Set<String> = []
+    private var poll: Timer?
     private let window: NSWindow
     private let web: WKWebView
 
@@ -86,9 +166,11 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
         super.init()
         web.navigationDelegate = self
         window.delegate = self
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // Not ordered in: the page loads in a window nobody can see yet.
         web.load(URLRequest(url: url))
+        poll = Timer.scheduledTimer(withTimeInterval: pollEvery, repeats: true) { [weak self] _ in
+            self?.inspect()
+        }
     }
 
     private func finishIfComplete() {
@@ -98,8 +180,49 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
               let cookie = found[name]
         else { return }
         done = true
+        poll?.invalidate()
+        note(revealed ? "delivered" : "delivered without showing the window")
         deliver(user, name, cookie)
         NSApp.terminate(nil)
+    }
+
+    // Show the window and bring it forward: a person is needed.
+    private func reveal(_ why: String) {
+        guard !done, !revealed else { return }
+        revealed = true
+        note("showing the window (\(why))")
+        NSApp.setActivationPolicy(.regular)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        // Activation can be refused when launched from a terminal; the window
+        // still has to come up, so order it front regardless.
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func inspect() {
+        guard !done else { return }
+        if !revealed && Date() >= revealAt {
+            reveal("no result after \(Int(revealAfter))s")
+        }
+        web.evaluateJavaScript(pageStateJS) { [weak self] result, _ in
+            guard let self, !self.done else { return }
+            switch result as? String ?? "" {
+            case "input":
+                self.reveal("the page wants input")
+            case let kind where (kind == "kmsi" || kind == "pick") && !self.answered.contains(kind):
+                // Once each per run, so a page that keeps coming back is left
+                // to the person rather than clicked in a loop.
+                self.answered.insert(kind)
+                self.web.evaluateJavaScript("(\(answerJS))('\(kind)')") { r, _ in
+                    guard (r as? Bool) == true else { return }
+                    note("answered Entra \(kind == "kmsi" ? "\"Stay signed in?\"" : "account picker")")
+                    self.revealAt = Date().addingTimeInterval(revealAfter)
+                }
+            default:
+                break
+            }
+        }
     }
 
     // 3 — the callback scheme, when a portal does use it.
@@ -152,7 +275,27 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
                 rest = rest[c.upperBound...]
             }
             self.finishIfComplete()
+            self.inspect()
         }
+    }
+
+    // A page that fails to load is a page the person should see. Not a load
+    // that was merely superseded — a script redirecting mid-load, or the
+    // callback scheme being cancelled above — which is routine in SAML.
+    private func failed(_ error: Error) {
+        let e = error as NSError
+        if e.domain == NSURLErrorDomain && e.code == NSURLErrorCancelled { return }
+        if e.domain == "WebKitErrorDomain" && e.code == 102 { return }  // frame load interrupted
+        reveal("a page failed to load")
+    }
+
+    func webView(_ w: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        failed(error)
+    }
+
+    func webView(_ w: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        failed(error)
     }
 
     // Closing the window is how you cancel; gpn then times out and says so.
@@ -168,6 +311,8 @@ guard args.count > 1, let url = URL(string: args[1]) else {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+// No Dock icon and no activation until the window is needed; reveal()
+// switches to .regular.
+app.setActivationPolicy(.accessory)
 let login = Login(url: url)
 app.run()

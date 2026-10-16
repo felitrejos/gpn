@@ -83,13 +83,20 @@ one depends on how the portal is configured:
 
 Only the third can escape a browser, and most portals do not use it. So the
 sign-in runs in `GPNSamlLogin.app` — a window `install.sh` builds from about
-170 lines of Swift in [saml-handler/](saml-handler/) — which can read its own
+300 lines of Swift in [saml-handler/](saml-handler/) — which can read its own
 responses. It accepts all three, hands the result to `gpn` through a FIFO, and
 closes itself. The cookie then goes to openconnect on stdin.
 
 The window keeps its own cookie jar, so your identity-provider session carries
-across connects. After the first sign-in most connects need no typing at all:
-the window opens, the provider recognises the session, and it closes again.
+across connects, and it starts hidden. When the provider recognises the
+session the whole sign-in happens out of sight — no window, no stolen focus.
+It shows itself only when you are needed: a page with a field to fill in, or
+four seconds without a result (an MFA prompt, say).
+
+On Microsoft Entra ID it also answers two pages for you: "Stay signed in?"
+gets Yes, so the next connect can be silent too, and "Pick an account" is
+answered when only one account is listed. It clicks; it never types. Your
+username, password and codes are always yours to enter.
 
 ## Troubleshooting
 

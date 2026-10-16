@@ -148,8 +148,13 @@ Runs the whole sign-in and spends the cookie at the gateway with
 `--cookieonly`: no root, no tunnel, cookies redacted. Use it for every
 diagnostic step — never debug by raising a real tunnel.
 
-It opens a window, so the user has to be at the keyboard. Expect: window
-appears, they sign in, window closes itself, trace ends with a cookie.
+The user has to be at the keyboard. The window starts hidden and appears only
+when a page wants input or nothing has come back after a few seconds, so
+expect: window appears, they sign in, window closes itself, trace ends with a
+cookie. Once the provider has a saved session, a run can finish with no window
+at all — that is success, not a skipped step. On Entra ID the window answers
+"Stay signed in?" with Yes and picks the account when only one is offered;
+it never types anything.
 
 | In the trace | Meaning | Action |
 | --- | --- | --- |
@@ -222,6 +227,11 @@ From building this against a live portal:
 - **Open the FIFO read-write before launching the window.** Opening it
   read-only blocks until a writer appears, and a result that lands before the
   read is then buffered rather than lost.
+- **A hidden sign-in must not reveal on routine noise.** SAML pages replace
+  themselves mid-load, which WebKit reports as a cancelled (`-999`) or
+  interrupted (`102`) navigation; treat those as failures and the window pops
+  up on every silent sign-in. And a SAML auto-post page is full of hidden
+  inputs — only a *visible* text or password field means a person is needed.
 - **The tunnel-up message differs by tunnel type.** A GlobalProtect ESP tunnel
   logs `Configured as <ip>`; a plain SSL one logs `Connected as <ip>`. Parse
   both.
