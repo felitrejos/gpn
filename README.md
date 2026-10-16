@@ -110,6 +110,27 @@ On Microsoft Entra ID it also answers two pages for you: "Stay signed in?"
 gets Yes, so the next connect can be silent too, and "Pick an account" is
 answered when only one account is listed.
 
+### Password managers
+
+`OP_ITEM` above is the hands-free route. Without it — another password
+manager, or a provider other than Entra — the window is not a browser, so
+browser extensions and the inline AutoFill popup do not reach it, and neither
+do passkeys: macOS only grants WebAuthn to web views in apps Apple has
+entitled as browsers. What does reach it:
+
+- **1Password Universal Autofill.** Click into the email field and press
+  `⌘\`. 1Password needs Accessibility permission (System Settings → Privacy &
+  Security → Accessibility). The first time, pick the login and choose
+  *Always Allow*; that links the item to the *VPN sign-in* app so later fills
+  need no choosing.
+- **Edit → AutoFill → Passwords…**, the system picker, with the cursor in a
+  field. It lists what your AutoFill providers offer; with no domain to match
+  on, expect to search for the item.
+- **Paste.** Copy the password in your manager and `⌘V` it into the field.
+
+The title bar shows the host you are typing into, since there is no address
+bar — check it reads `login.microsoftonline.com` (or your provider) first.
+
 ## Troubleshooting
 
 `gpn test-auth` runs the whole sign-in and hands the cookie to the gateway,

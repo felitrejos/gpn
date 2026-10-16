@@ -29,8 +29,9 @@
 // Two Entra ID pages that only ask "continue?" are answered automatically:
 // "Stay signed in?" gets Yes, so the next sign-in can be silent too, and
 // "Pick an account" with exactly one account picks it. Each is tried at most
-// once per run, only on login.microsoftonline.com, and only when its markers
-// match; anything else is left for the person.
+// once per run, only on the fill hosts (login.microsoftonline.com unless
+// configured), and only when its markers match; anything else is left for
+// the person.
 //
 // Optionally, 1Password fills the identity provider's sign-in (see Filler
 // below). gpn passes a secret *reference*, never a secret; the window asks
@@ -42,7 +43,7 @@
 //   GPN_SAML_FIFO     where to deliver the result
 //   GPN_OP_ITEM       op://Vault/Item — enables 1Password fill
 //   GPN_OP_AUTOFILL   1 = fill as fields appear, 0 = only on Cmd+Shift+L
-//   GPN_FILL_HOSTS    hosts that may be filled (default login.microsoftonline.com)
+//   GPN_FILL_HOSTS    hosts that may be filled or clicked (default login.microsoftonline.com)
 // and for testing against a local fixture with a fake `op`:
 //   GPN_OP_BIN        the op binary; found on PATH when unset
 
@@ -76,9 +77,11 @@ func note(_ s: String) {
 //   "kmsi"  — Entra's "Stay signed in?" page.
 //   "pick"  — Entra's account picker with exactly one account.
 //   ""      — nothing recognisable; keep waiting.
+// Both scripts are function bodies run with callAsyncJavaScript in the client
+// content world; `hosts` (the fill allowlist) and `kind` arrive as arguments.
 // Kept at column 0 inside a raw string so the source text is the script.
 let pageStateJS = #"""
-(() => {
+return (() => {
   const shown = e => {
     if (!e) return false;
     const r = e.getBoundingClientRect(), s = getComputedStyle(e);
@@ -89,7 +92,7 @@ let pageStateJS = #"""
     ' input[type=tel], input[type=number], textarea')].filter(shown);
   if (typing.length)
     return typing.every(e => ['loginfmt', 'passwd', 'otc'].includes(e.name)) ? 'fillable' : 'input';
-  if (location.hostname !== 'login.microsoftonline.com') return '';
+  if (!hosts.includes(location.hostname.toLowerCase())) return '';
   if (document.getElementById('KmsiCheckboxField') && shown(document.getElementById('idSIButton9')))
     return 'kmsi';
   const tiles = [...document.querySelectorAll('#tilesHolder [data-test-id]')]
@@ -103,8 +106,8 @@ let pageStateJS = #"""
 // Answers a page pageStateJS recognised. Re-checks the same markers first and
 // does nothing if they no longer match. Clicks only — never fills a field.
 let answerJS = #"""
-(kind => {
-  if (location.hostname !== 'login.microsoftonline.com') return false;
+return (kind => {
+  if (!hosts.includes(location.hostname.toLowerCase())) return false;
   if (kind === 'kmsi') {
     const b = document.getElementById('idSIButton9');
     if (!document.getElementById('KmsiCheckboxField') || !b) return false;
@@ -119,7 +122,7 @@ let answerJS = #"""
     return true;
   }
   return false;
-})
+})(kind)
 """#
 
 func isWanted(_ key: String) -> Bool {
@@ -398,6 +401,7 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private let window: NSWindow
     private let web: WKWebView
     let filler: Filler?
+    private var urlObservation: NSKeyValueObservation?
 
     init(url: URL) {
         let cfg = WKWebViewConfiguration()
@@ -419,6 +423,14 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
         super.init()
         web.navigationDelegate = self
         window.delegate = self
+        window.initialFirstResponder = web
+        // There is no address bar, so the title names the host being typed
+        // into — the one check a person can make before entering a password.
+        urlObservation = web.observe(\.url, options: [.initial, .new]) { [weak self] web, _ in
+            guard let self else { return }
+            let host = web.url?.host ?? ""
+            self.window.title = host.isEmpty ? "VPN sign-in" : "VPN sign-in — \(host)"
+        }
         filler?.onProgress = { [weak self] in
             self?.revealAt = Date().addingTimeInterval(revealAfter)
         }
@@ -464,8 +476,10 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
         if !revealed && Date() >= revealAt {
             reveal("no result after \(Int(revealAfter))s")
         }
-        web.evaluateJavaScript(pageStateJS) { [weak self] result, _ in
+        web.callAsyncJavaScript(pageStateJS, arguments: ["hosts": fillHosts],
+                                in: nil, in: .defaultClient) { [weak self] r in
             guard let self, !self.done else { return }
+            guard case .success(let result) = r else { return }
             switch result as? String ?? "" {
             case "input":
                 self.reveal("the page wants input")
@@ -475,8 +489,9 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
                 // Once each per run, so a page that keeps coming back is left
                 // to the person rather than clicked in a loop.
                 self.answered.insert(kind)
-                self.web.evaluateJavaScript("(\(answerJS))('\(kind)')") { r, _ in
-                    guard (r as? Bool) == true else { return }
+                self.web.callAsyncJavaScript(answerJS, arguments: ["kind": kind, "hosts": fillHosts],
+                                             in: nil, in: .defaultClient) { r in
+                    guard case .success(let v) = r, (v as? Bool) == true else { return }
                     note("answered Entra \(kind == "kmsi" ? "\"Stay signed in?\"" : "account picker")")
                     self.revealAt = Date().addingTimeInterval(revealAfter)
                 }
@@ -571,14 +586,31 @@ guard args.count > 1, let url = URL(string: args[1]) else {
     exit(2)
 }
 
-// Without a main menu there are no key equivalents: no Quit, and no paste
-// into the sign-in form.
-func mainMenu(fill target: Filler?) -> NSMenu {
-    let appMenu = NSMenu()
-    appMenu.addItem(withTitle: "Quit VPN sign-in",
-                    action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+// An AppKit app with no main menu has no key equivalents: Cmd-V, Cmd-C, Cmd-A
+// and Cmd-Z are routed through the menu bar, so without one the web view never
+// sees them and pasting a password copied from a password manager silently
+// does nothing. Universal Autofill in 1Password (Cmd-\) is a global hotkey and
+// fills through the Accessibility API, so it does not need this — but paste,
+// the fallback for every password manager, does.
+func installMainMenu(fill target: Filler?) {
+    let bar = NSMenu()
 
+    let appItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "Hide VPN sign-in", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+    appMenu.addItem(.separator())
+    appMenu.addItem(withTitle: "Quit VPN sign-in", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appItem.submenu = appMenu
+    bar.addItem(appItem)
+
+    // Targets are nil: each action goes down the responder chain to whatever
+    // has focus, which inside the window is the web view's focused field.
+    let editItem = NSMenuItem()
     let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    edit.addItem(.separator())
     edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
     edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
     edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
@@ -590,14 +622,18 @@ func mainMenu(fill target: Filler?) -> NSMenu {
         item.keyEquivalentModifierMask = [.command, .shift]
         item.target = target
     }
+    editItem.submenu = edit
+    bar.addItem(editItem)
 
-    let menu = NSMenu()
-    for sub in [appMenu, edit] {
-        let item = NSMenuItem()
-        item.submenu = sub
-        menu.addItem(item)
-    }
-    return menu
+    let windowItem = NSMenuItem()
+    let win = NSMenu(title: "Window")
+    win.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+    win.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    windowItem.submenu = win
+    bar.addItem(windowItem)
+
+    NSApp.mainMenu = bar
+    NSApp.windowsMenu = win
 }
 
 let app = NSApplication.shared
@@ -605,5 +641,5 @@ let app = NSApplication.shared
 // switches to .regular.
 app.setActivationPolicy(.accessory)
 let login = Login(url: url)
-app.mainMenu = mainMenu(fill: login.filler)
+installMainMenu(fill: login.filler)
 app.run()
