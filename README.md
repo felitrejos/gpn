@@ -63,6 +63,17 @@ Your username is not configured — the identity provider decides it, and the
 sign-in reports which name the gateway expects. Everything else has a working
 default; see [config.example](config.example) for the full list.
 
+If the login lives in 1Password, point the profile at it and the window fills
+the sign-in — username, password, and TOTP code — behind a Touch ID prompt:
+
+```bash
+OP_ITEM="op://Private/University SSO"
+```
+
+That is a reference, not a secret. It needs the `op` CLI with the 1Password
+app's CLI integration on. Cmd+Shift+L fills on demand; `OP_AUTOFILL="0"`
+makes that the only way.
+
 A second VPN is a second profile, with its own config and its own Raycast
 commands:
 
@@ -82,14 +93,17 @@ one depends on how the portal is configured:
 3. A redirect to `globalprotectcallback:`, wrapping the same fields.
 
 Only the third can escape a browser, and most portals do not use it. So the
-sign-in runs in `GPNSamlLogin.app` — a window `install.sh` builds from about
-170 lines of Swift in [saml-handler/](saml-handler/) — which can read its own
+sign-in runs in `GPNSamlLogin.app` — a window `install.sh` builds from one
+file of Swift in [saml-handler/](saml-handler/) — which can read its own
 responses. It accepts all three, hands the result to `gpn` through a FIFO, and
 closes itself. The cookie then goes to openconnect on stdin.
 
 The window keeps its own cookie jar, so your identity-provider session carries
 across connects. After the first sign-in most connects need no typing at all:
 the window opens, the provider recognises the session, and it closes again.
+When the provider does ask, 1Password can answer: each field is read from your
+vault only when the page shows it. An Authenticator push is still yours to
+approve.
 
 ## Troubleshooting
 
@@ -116,7 +130,13 @@ worked — ignore the banner.
   sign-in window to `gpn` through a FIFO, which holds it in kernel memory
   rather than on disk, and it is never logged or passed as an argument where
   `ps` would show it. `test-auth` redacts cookies from the trace it prints.
-- Config files hold no secrets, and `*.conf` is gitignored.
+- Config files hold no secrets, and `*.conf` is gitignored. `OP_ITEM` names a
+  1Password item; it does not contain one.
+- The 1Password fill reads one field at a time through a pipe from `op`, so
+  values never appear in arguments, the environment, files or logs. It fills
+  only `login.microsoftonline.com` over https (`OP_FILL_HOSTS` to change),
+  fills each field at most once, and stops at the first error the page shows:
+  a wrong password is submitted once, never retried into a lockout.
 - openconnect needs root to create the tunnel and set routes, so `install.sh`
   adds a passwordless sudo rule for that one binary. Worth knowing: openconnect
   can run a script as root (`--script`), so anything already able to run

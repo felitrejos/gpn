@@ -35,6 +35,29 @@ SAML_TIMEOUT="300"
 GATEWAY_MODE="1"
 
 # ---------------------------------------------------------------------------
+# 1Password (optional)
+# ---------------------------------------------------------------------------
+
+# Fill the identity provider's sign-in from a 1Password login item. This is a
+# secret *reference* — vault and item, not a password — so it is safe here.
+# Needs the 1Password app with "Integrate with 1Password CLI" on, and `op`.
+# The window reads username, password and the "one-time password" field, each
+# only when the page asks for it; 1Password asks for Touch ID to allow it.
+# Unset = no 1Password at all.
+# OP_ITEM="op://Private/University SSO"
+
+# 1 = fill each field as it appears and submit it, and answer Entra's
+#     "Stay signed in?" with yes so the next connect needs nothing.
+# 0 = only when you press Cmd+Shift+L (Edit > Fill from 1Password).
+# Either way each field is filled at most once, and the first error the page
+# shows hands the window back to you — a wrong password is never retried.
+OP_AUTOFILL="1"
+
+# Hosts the fill may happen on, space-separated. Anything else — including a
+# redirect to your institution's own login page — gets nothing.
+OP_FILL_HOSTS="login.microsoftonline.com"
+
+# ---------------------------------------------------------------------------
 # Optional
 # ---------------------------------------------------------------------------
 

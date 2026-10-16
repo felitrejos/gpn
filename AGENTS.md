@@ -24,10 +24,6 @@ machine, much of it is already on disk.
    and `*userauthcookie` values are live credentials.
 6. **Ask first** before removing the official client, hand-editing sudoers, or
    deleting configuration profiles.
-7. **The sign-in is the user's to perform.** Open the window and let them do
-   it. Never script credential entry into an identity provider: the markup
-   changes without notice, MFA blocks it anyway, and it trips exactly the
-   policies rule 4 is about.
 
 ## 1. Dependencies
 
@@ -37,7 +33,8 @@ xcode-select -p   # swiftc comes from the command line tools
 ```
 
 `swiftc` is not optional — it builds the sign-in window, which is the only way
-gpn authenticates.
+gpn authenticates. `op`, the 1Password CLI, is: only for filling the sign-in
+(step 5).
 
 ## 2. Read the official client's settings
 
@@ -122,6 +119,19 @@ it. There is no username to set.
 The config is sourced by bash, so never drop unescaped user-pasted content
 into it.
 
+**1Password.** If the user keeps this login in 1Password and `op` is
+installed with the app's CLI integration on, set `OP_ITEM="op://Vault/Item"`:
+a reference, not a secret, so rule 2 holds. The window then fills username,
+password and TOTP itself. Ask the user which item it is, then check its fields
+by label and type only — never values:
+
+```bash
+op item get "Item" --vault "Vault" --format json | jq '[.fields[] | {label, type}]'
+```
+
+It needs `username`, `password`, and for a TOTP a field labelled
+`one-time password`. Never `op read` a field to look at it; rule 1 applies.
+
 ## 6. Install
 
 ```bash
@@ -148,13 +158,20 @@ Runs the whole sign-in and spends the cookie at the gateway with
 `--cookieonly`: no root, no tunnel, cookies redacted. Use it for every
 diagnostic step — never debug by raising a real tunnel.
 
-It opens a window, so the user has to be at the keyboard. Expect: window
-appears, they sign in, window closes itself, trace ends with a cookie.
+It opens a window, so the user has to be there: to sign in, or with `OP_ITEM`
+set, to answer Touch ID and any Authenticator push. Expect: window appears,
+the fields fill (or they type), window closes itself, trace ends with a cookie.
+
+The fill stops for the session at the first error the page shows, or the
+first field it asks for twice, and never resubmits. Do not work around that —
+it is rule 4, enforced.
 
 | In the trace | Meaning | Action |
 | --- | --- | --- |
 | ends with `userauthcookie` | success | go to step 8 |
 | window closed with nothing returned | cancelled, or the portal returned neither headers nor a comment | re-run; if it repeats, dump the final page and look for where the fields are |
+| fields stay empty with `OP_ITEM` set | `op` locked or cancelled, wrong item, or the page is not on `OP_FILL_HOSTS` | check the item's fields as in step 5; the user can still type, or press Cmd+Shift+L |
+| filled once, then left alone | the provider rejected a value | fix the 1Password item; do not re-run to see if it passes |
 | cookie arrives, gateway refuses it | wrong endpoint for this cookie | `GATEWAY_MODE="0"` |
 | refused either way round | provider may demand a managed device | nothing to fix; report it |
 
@@ -205,7 +222,8 @@ From building this against a live portal:
   while nothing is listening.
 - **Which means the sign-in cannot happen in the user's own browser.** Nothing
   outside a browser can read those response headers. That is the entire reason
-  the sign-in window exists, rather than shelling out to `open`.
+  the sign-in window exists, rather than shelling out to `open`. It is also why
+  the 1Password browser extension cannot help, and the window asks `op`.
 - **openconnect cannot do GlobalProtect SAML by itself.** It prints the
   provider URL and gives up with `Failed to parse XML server response`. Its
   `--external-browser` flag looks like the answer and is not — that is
