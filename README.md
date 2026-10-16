@@ -83,13 +83,32 @@ one depends on how the portal is configured:
 
 Only the third can escape a browser, and most portals do not use it. So the
 sign-in runs in `GPNSamlLogin.app` — a window `install.sh` builds from about
-170 lines of Swift in [saml-handler/](saml-handler/) — which can read its own
+220 lines of Swift in [saml-handler/](saml-handler/) — which can read its own
 responses. It accepts all three, hands the result to `gpn` through a FIFO, and
 closes itself. The cookie then goes to openconnect on stdin.
 
 The window keeps its own cookie jar, so your identity-provider session carries
 across connects. After the first sign-in most connects need no typing at all:
 the window opens, the provider recognises the session, and it closes again.
+
+### Password managers
+
+The window is not a browser, so browser extensions and the inline AutoFill
+popup do not reach it, and neither do passkeys: macOS only grants WebAuthn to
+web views in apps Apple has entitled as browsers. What reaches it:
+
+- **1Password Universal Autofill.** Click into the email field and press
+  `⌘\`. 1Password needs Accessibility permission (System Settings → Privacy &
+  Security → Accessibility). The first time, pick the login and choose
+  *Always Allow*; that links the item to the *VPN sign-in* app so later fills
+  need no choosing.
+- **Edit → AutoFill → Passwords…**, the system picker, with the cursor in a
+  field. It lists what your AutoFill providers offer; with no domain to match
+  on, expect to search for the item.
+- **Paste.** Copy the password in your manager and `⌘V` it into the field.
+
+The title bar shows the host you are typing into, since there is no address
+bar — check it reads `login.microsoftonline.com` (or your provider) first.
 
 ## Troubleshooting
 

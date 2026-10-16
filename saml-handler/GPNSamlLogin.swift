@@ -62,11 +62,55 @@ func tagValue(_ name: String, in text: String) -> String? {
     return v.isEmpty ? nil : v
 }
 
+// An AppKit app with no main menu has no key equivalents: Cmd-V, Cmd-C, Cmd-A
+// and Cmd-Z are routed through the menu bar, so without one the web view never
+// sees them and pasting a password copied from a password manager silently
+// does nothing. Universal Autofill in 1Password (Cmd-\) is a global hotkey and
+// fills through the Accessibility API, so it does not need this — but paste,
+// the fallback for every password manager, does.
+func installMainMenu() {
+    let bar = NSMenu()
+
+    let appItem = NSMenuItem()
+    let appMenu = NSMenu()
+    appMenu.addItem(withTitle: "Hide VPN sign-in", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+    appMenu.addItem(.separator())
+    appMenu.addItem(withTitle: "Quit VPN sign-in", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appItem.submenu = appMenu
+    bar.addItem(appItem)
+
+    // Targets are nil: each action goes down the responder chain to whatever
+    // has focus, which inside the window is the web view's focused field.
+    let editItem = NSMenuItem()
+    let edit = NSMenu(title: "Edit")
+    edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+    redo.keyEquivalentModifierMask = [.command, .shift]
+    edit.addItem(.separator())
+    edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editItem.submenu = edit
+    bar.addItem(editItem)
+
+    let windowItem = NSMenuItem()
+    let win = NSMenu(title: "Window")
+    win.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+    win.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    windowItem.submenu = win
+    bar.addItem(windowItem)
+
+    NSApp.mainMenu = bar
+    NSApp.windowsMenu = win
+}
+
 final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private var found: [String: String] = [:]
     private var done = false
     private let window: NSWindow
     private let web: WKWebView
+    private var urlObservation: NSKeyValueObservation?
 
     init(url: URL) {
         let cfg = WKWebViewConfiguration()
@@ -86,6 +130,14 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
         super.init()
         web.navigationDelegate = self
         window.delegate = self
+        window.initialFirstResponder = web
+        // There is no address bar, so the title names the host being typed
+        // into — the one check a person can make before entering a password.
+        urlObservation = web.observe(\.url, options: [.initial, .new]) { [weak self] web, _ in
+            guard let self else { return }
+            let host = web.url?.host ?? ""
+            self.window.title = host.isEmpty ? "VPN sign-in" : "VPN sign-in — \(host)"
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         web.load(URLRequest(url: url))
@@ -169,5 +221,6 @@ guard args.count > 1, let url = URL(string: args[1]) else {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
+installMainMenu()
 let login = Login(url: url)
 app.run()
