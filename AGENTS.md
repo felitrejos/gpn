@@ -174,7 +174,7 @@ it is rule 4, enforced.
 | --- | --- | --- |
 | ends with `userauthcookie` | success | go to step 8 |
 | window closed with nothing returned | cancelled, or the portal returned neither headers nor a comment | re-run; if it repeats, dump the final page and look for where the fields are |
-| fields stay empty with `OP_ITEM` set | `op` locked or cancelled, wrong item, or the page is not on `OP_FILL_HOSTS` | check the item's fields as in step 5; the user can still type, or press Cmd+Shift+L |
+| fields stay empty with `OP_ITEM` set | `op` locked or cancelled, wrong item, or the page is not on `OP_FILL_HOSTS` | `gpn logs` shows a `sign-in: page <host>` line per host visited; add the login page's host to `OP_FILL_HOSTS`. Unknown field names need adding to `fillFields` in the Swift source |
 | filled once, then left alone | the provider rejected a value | fix the 1Password item; do not re-run to see if it passes |
 | cookie arrives, gateway refuses it | wrong endpoint for this cookie | `GATEWAY_MODE="0"` |
 | refused either way round | provider may demand a managed device | nothing to fix; report it |

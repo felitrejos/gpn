@@ -158,10 +158,11 @@ saml_login() {
 
     echo "Signing in to ${PORTAL}… (a window opens only if you are needed)" >&2
     # The 1Password settings are a reference and two flags; the window asks
-    # `op` for each field itself, so no secret passes through here.
+    # `op` for each field itself, so no secret passes through here. Its notes
+    # (hosts visited, fields filled, why it showed itself) go to the log.
     GPN_SAML_FIFO="$SAML_FIFO" \
     GPN_OP_ITEM="$OP_ITEM" GPN_OP_AUTOFILL="$OP_AUTOFILL" GPN_FILL_HOSTS="$OP_FILL_HOSTS" \
-        "$bin" "$url" >/dev/null 2>&1 &
+        "$bin" "$url" >/dev/null 2>>"$LOGFILE" &
     local app_pid=$!
 
     local un cname ck ok=1

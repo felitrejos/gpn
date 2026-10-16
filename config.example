@@ -53,8 +53,14 @@ GATEWAY_MODE="1"
 # shows hands the window back to you — a wrong password is never retried.
 OP_AUTOFILL="1"
 
-# Hosts the fill may happen on, space-separated. Anything else — including a
-# redirect to your institution's own login page — gets nothing.
+# Hosts the fill may happen on, space-separated. Anything else gets nothing.
+# The window knows Entra's own fields and NetIQ Access Manager's (the
+# /nidp/ login page some institutions federate Entra to); add that page's
+# host here if your sign-in goes through one, e.g.
+#   OP_FILL_HOSTS="login.microsoftonline.com login.example.edu"
+# A host proxied by Defender for Cloud Apps (<host>.mcas.ms) counts as the
+# host it proxies. The "Stay signed in?" and account-picker clicks use this
+# list too.
 OP_FILL_HOSTS="login.microsoftonline.com"
 
 # ---------------------------------------------------------------------------

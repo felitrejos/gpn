@@ -160,7 +160,8 @@ worked — ignore the banner.
   1Password item; it does not contain one.
 - The 1Password fill reads one field at a time through a pipe from `op`, so
   values never appear in arguments, the environment, files or logs. It fills
-  only `login.microsoftonline.com` over https (`OP_FILL_HOSTS` to change),
+  only `login.microsoftonline.com` over https (`OP_FILL_HOSTS` adds others,
+  such as an institution's NetIQ login page),
   fills each field at most once, and stops at the first error the page shows:
   a wrong password is submitted once, never retried into a lockout.
 - openconnect needs root to create the tunnel and set routes, so `install.sh`

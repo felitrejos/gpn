@@ -63,22 +63,33 @@ let revealAfter: TimeInterval = 4
 // How often the hidden page is checked for something that wants a person.
 let pollEvery: TimeInterval = 0.5
 
-// Progress notes for debugging. gpn discards them; they never carry a URL,
-// a page's content or a cookie.
+// Progress notes for debugging; gpn appends them to the profile's log. They
+// name hosts and field names at most — never a path, a query, a page's
+// content, a cookie or a filled value.
+let noteTime: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return f
+}()
+
 func note(_ s: String) {
-    FileHandle.standardError.write("GPNSamlLogin: \(s)\n".data(using: .utf8)!)
+    let line = "[\(noteTime.string(from: Date()))] sign-in: \(s)\n"
+    FileHandle.standardError.write(line.data(using: .utf8)!)
 }
 
 // Classifies the current page. Returns:
 //   "input" — a visible field to type into, or several accounts to choose
-//             from: a person is needed now.
-//   "fillable" — only Entra's username, password or code fields, which
-//             1Password may be about to fill.
+//             from: a person is needed now. Unknown fields come back as
+//             "input:<name,…>" — their names only, for the log.
+//   "fillable" — only sign-in fields 1Password knows (`names`), which it
+//             may be about to fill.
 //   "kmsi"  — Entra's "Stay signed in?" page.
 //   "pick"  — Entra's account picker with exactly one account.
 //   ""      — nothing recognisable; keep waiting.
 // Both scripts are function bodies run with callAsyncJavaScript in the client
-// content world; `hosts` (the fill allowlist) and `kind` arrive as arguments.
+// content world; `hosts` (the fill allowlist), `names` (the fillable field
+// names) and `kind` arrive as arguments.
 // Kept at column 0 inside a raw string so the source text is the script.
 let pageStateJS = #"""
 return (() => {
@@ -91,8 +102,9 @@ return (() => {
     'input:not([type]), input[type=text], input[type=email], input[type=password],' +
     ' input[type=tel], input[type=number], textarea')].filter(shown);
   if (typing.length)
-    return typing.every(e => ['loginfmt', 'passwd', 'otc'].includes(e.name)) ? 'fillable' : 'input';
-  if (!hosts.includes(location.hostname.toLowerCase())) return '';
+    return typing.every(e => names.includes(e.name)) ? 'fillable'
+      : 'input:' + typing.map(e => e.name || e.id || e.type).join(',');
+  if (!hosts.includes(location.hostname.toLowerCase().replace(/\.mcas\.ms$/, ''))) return '';
   if (document.getElementById('KmsiCheckboxField') && shown(document.getElementById('idSIButton9')))
     return 'kmsi';
   const tiles = [...document.querySelectorAll('#tilesHolder [data-test-id]')]
@@ -107,7 +119,7 @@ return (() => {
 // does nothing if they no longer match. Clicks only — never fills a field.
 let answerJS = #"""
 return (kind => {
-  if (!hosts.includes(location.hostname.toLowerCase())) return false;
+  if (!hosts.includes(location.hostname.toLowerCase().replace(/\.mcas\.ms$/, ''))) return false;
   if (kind === 'kmsi') {
     const b = document.getElementById('idSIButton9');
     if (!document.getElementById('KmsiCheckboxField') || !b) return false;
@@ -198,12 +210,32 @@ func opBinary() -> String? {
         .first { fm.isExecutableFile(atPath: $0) }
 }
 
+// The sign-in fields 1Password can fill, by the input's name, and the item
+// field each one reads: Entra's own pages, and NetIQ Access Manager (the
+// provider many institutions federate Entra to). Kept in the order a page
+// should be filled: username before password, so a page that shows both
+// is submitted once, with both.
+let fillFields: KeyValuePairs<String, String> = [
+    "loginfmt": "username",          // Entra: email
+    "Ecom_User_ID": "username",      // NetIQ
+    "passwd": "password",            // Entra
+    "Ecom_Password": "password",     // NetIQ
+    "otc": "one-time password?attribute=otp",  // Entra: verification code
+]
+let fillNames = fillFields.map { $0.key }
+
 let fillHosts: [String] = (env["GPN_FILL_HOSTS"] ?? "login.microsoftonline.com")
     .split(whereSeparator: { $0 == "," || $0 == " " })
     .map { $0.lowercased() }
 
+// Defender for Cloud Apps proxies a site as <host>.mcas.ms; behind it, the
+// host to check is the one being proxied. The scripts strip it the same way.
+func unproxied(_ host: String) -> String {
+    host.hasSuffix(".mcas.ms") ? String(host.dropLast(".mcas.ms".count)) : host
+}
+
 func fillAllowed(_ url: URL?) -> Bool {
-    guard let url, let host = url.host?.lowercased(), fillHosts.contains(host) else { return false }
+    guard let url, let host = url.host?.lowercased(), fillHosts.contains(unproxied(host)) else { return false }
     let loopback = ["127.0.0.1", "localhost", "::1"].contains(host)
     return url.scheme == "https" || (loopback && url.scheme == "http")
 }
@@ -234,12 +266,12 @@ func opRead(_ bin: String, _ ref: String) -> String? {
 // can neither see these functions nor post to the handler they report to. It
 // reports what the page wants each time that changes. Entra swaps the
 // username view for the password view without a page load, so this watches
-// the DOM rather than waiting for didFinish.
+// the DOM rather than waiting for didFinish. It reports the name of the first
+// empty field it can fill.
 let watcherJS = """
 (() => {
   if (window.__gpn) return;
-  const fields = [["otp", 'input[name="otc"]'], ["password", 'input[name="passwd"]'],
-                  ["username", 'input[name="loginfmt"]']];
+  const names = __NAMES__;
   const errors = '#usernameError, #passwordError, #idTD_Error, #idSpan_SAOTCC_Error_OTC, .alert-error';
   // Entra keeps an off-screen copy of loginfmt on the password view; skip it.
   const shown = el => {
@@ -251,7 +283,7 @@ let watcherJS = """
   const pick = sel => [...document.querySelectorAll(sel)]
     .find(el => el.type !== "hidden" && !el.disabled && !el.readOnly && shown(el));
   const need = () => {
-    for (const [kind, sel] of fields) { const el = pick(sel); if (el) return el.value ? "" : kind; }
+    for (const n of names) { const el = pick(`input[name="${n}"]`); if (el && !el.value) return n; }
     return "";
   };
   const state = () =>
@@ -271,26 +303,28 @@ let watcherJS = """
 })();
 """
 
-// Fills one field and submits. `kind`, `value` and `hosts` arrive as
+// Fills one field, and submits once no other fillable field on the page is
+// empty. `kind` (the input's name), `value`, `names` and `hosts` arrive as
 // arguments, never as source. Rechecks the host: the page may have moved on
 // while `op` waited for Touch ID.
 let fillJS = """
-if (!window.__gpn || !hosts.includes(location.hostname.toLowerCase())) return "host";
-const sel = { username: 'input[name="loginfmt"]', password: 'input[name="passwd"]',
-              otp: 'input[name="otc"]' }[kind];
-if (sel) {
-  const el = window.__gpn.pick(sel);
-  if (!el || el.value) return "absent";
-  el.focus();
-  // The prototype setter, then events, so knockout or React sees the value.
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
-  for (const t of ["input", "change"]) el.dispatchEvent(new Event(t, { bubbles: true }));
-}
+if (!window.__gpn || !hosts.includes(location.hostname.toLowerCase().replace(/\\.mcas\\.ms$/, ''))) return "host";
+const el = window.__gpn.pick(`input[name="${CSS.escape(kind)}"]`);
+if (!el || el.value) return "absent";
+// Entra wants an email; a bare username would only earn an error, and an
+// error ends autofill. Leave it to the person.
+if (kind === "loginfmt" && !value.includes("@")) return "not an email";
+el.focus();
+// The prototype setter, then events, so knockout or React sees the value.
+Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
+for (const t of ["input", "change"]) el.dispatchEvent(new Event(t, { bubbles: true }));
+if (window.__gpn.need()) return "filled";
 await new Promise(r => setTimeout(r, 200));
-const button = window.__gpn.pick("#idSubmit_SAOTCC_Continue") || window.__gpn.pick("#idSIButton9");
-if (!button) return "filled";
-button.click();
-return "submitted";
+const button = window.__gpn.pick("#idSubmit_SAOTCC_Continue") || window.__gpn.pick("#idSIButton9")
+  || window.__gpn.pick("#loginButton2");
+if (button) { button.click(); return "submitted"; }
+if (el.form) { el.form.requestSubmit(); return "submitted"; }
+return "filled";
 """
 
 final class Filler: NSObject, WKScriptMessageHandler {
@@ -302,18 +336,12 @@ final class Filler: NSObject, WKScriptMessageHandler {
     private var stopped = false
     private(set) var busy = false
     // The window stays hidden while a fill is under way: progress restarts
-    // its reveal clock, and a stop shows it, since the person must take over.
+    // its reveal clock, and a hand-off shows it, since the person must take over.
     var onProgress: (() -> Void)?
-    var onStop: (() -> Void)?
+    var onHandOff: (() -> Void)?
 
     /// Whether fields will be filled as they appear.
     var active: Bool { autofill && !stopped }
-
-    private static let fields = [
-        "username": "username",
-        "password": "password",
-        "otp": "one-time password?attribute=otp",
-    ]
 
     /// nil when 1Password fill is not configured or `op` is missing.
     init?(config: WKWebViewConfiguration) {
@@ -325,7 +353,9 @@ final class Filler: NSObject, WKScriptMessageHandler {
         super.init()
         let ucc = config.userContentController
         ucc.add(self, contentWorld: .defaultClient, name: "gpnFill")
-        ucc.addUserScript(WKUserScript(source: watcherJS, injectionTime: .atDocumentEnd,
+        let names = String(data: try! JSONSerialization.data(withJSONObject: fillNames), encoding: .utf8)!
+        let source = watcherJS.replacingOccurrences(of: "__NAMES__", with: names)
+        ucc.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentEnd,
                                        forMainFrameOnly: true, in: .defaultClient))
     }
 
@@ -353,12 +383,12 @@ final class Filler: NSObject, WKScriptMessageHandler {
     private func stop(_ why: String) {
         if !stopped { note("1Password: autofill stopped, \(why)") }
         stopped = true
-        onStop?()
+        onHandOff?()
     }
 
     private func fill(_ kind: String) {
         guard let web, fillAllowed(web.url) else { return }
-        guard let field = Filler.fields[kind] else { return }
+        guard let field = fillFields.first(where: { $0.key == kind })?.value else { return }
         busy = true
         filled.insert(kind)
         let (bin, ref) = (bin, "\(item)/\(field)")
@@ -378,12 +408,18 @@ final class Filler: NSObject, WKScriptMessageHandler {
 
     private func inject(_ kind: String, _ value: String) {
         guard let web, fillAllowed(web.url) else { busy = false; return }
-        web.callAsyncJavaScript(fillJS, arguments: ["kind": kind, "value": value, "hosts": fillHosts],
+        web.callAsyncJavaScript(fillJS, arguments: ["kind": kind, "value": value,
+                                                    "names": fillNames, "hosts": fillHosts],
                                 in: nil, in: .defaultClient) { [weak self] r in
             guard let self else { return }
             self.busy = false
             self.onProgress?()
-            if case .success(let v) = r { note("1Password: \(kind) \(v as? String ?? "")") }
+            let outcome = (try? r.get()) as? String ?? ""
+            note("1Password: \(kind) \(outcome)")
+            // Not filled, but not refused either: the person types this one,
+            // and autofill carries on for the fields after it. No rescan — it
+            // would report this field again and read as a refusal.
+            if outcome == "not an email" { self.onHandOff?(); return }
             // Anything that changed while busy was swallowed; look again.
             self.web?.callAsyncJavaScript("window.__gpn && window.__gpn.rescan()",
                                           arguments: [:], in: nil, in: .defaultClient)
@@ -398,6 +434,7 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private var revealAt = Date().addingTimeInterval(revealAfter)
     private var answered: Set<String> = []
     private var poll: Timer?
+    private var lastHost = ""
     private let window: NSWindow
     private let web: WKWebView
     let filler: Filler?
@@ -434,7 +471,7 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
         filler?.onProgress = { [weak self] in
             self?.revealAt = Date().addingTimeInterval(revealAfter)
         }
-        filler?.onStop = { [weak self] in self?.reveal("1Password fill stopped") }
+        filler?.onHandOff = { [weak self] in self?.reveal("1Password fill stopped") }
         // Not ordered in: the page loads in a window nobody can see yet.
         web.load(URLRequest(url: url))
         poll = Timer.scheduledTimer(withTimeInterval: pollEvery, repeats: true) { [weak self] _ in
@@ -480,9 +517,14 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
                                 in: nil, in: .defaultClient) { [weak self] r in
             guard let self, !self.done else { return }
             guard case .success(let result) = r else { return }
-            switch result as? String ?? "" {
-            case "input":
-                self.reveal("the page wants input")
+            let state = result as? String ?? ""
+            if state.hasPrefix("input") {
+                let fields = state.dropFirst("input:".count)
+                self.reveal(fields.isEmpty ? "the page wants input"
+                                           : "the page wants input: \(fields)")
+                return
+            }
+            switch state {
             case "fillable" where self.filler?.active != true:
                 self.reveal("the page wants input")
             case let kind where (kind == "kmsi" || kind == "pick") && !self.answered.contains(kind):
@@ -504,6 +546,14 @@ final class Login: NSObject, WKNavigationDelegate, NSWindowDelegate {
     // 3 — the callback scheme, when a portal does use it.
     func webView(_ w: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // Which hosts the sign-in passes through — the first thing to know
+        // when a provider adds a hop (a proxy, a federated login page). The
+        // host only: paths and queries carry SAML state.
+        if action.targetFrame?.isMainFrame == true, let host = action.request.url?.host,
+           host != lastHost {
+            lastHost = host
+            note("page \(host)")
+        }
         if let u = action.request.url, u.scheme == "globalprotectcallback" {
             decisionHandler(.cancel)
             var b64 = u.absoluteString
