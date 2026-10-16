@@ -118,8 +118,10 @@ load_config() {
 # as a bare "authentication successful". Neither can be read from outside a
 # browser, which is why the login runs in GPNSamlLogin.app, a window that can
 # see its own responses. It keeps a persistent cookie jar, so an
-# identity-provider session carries across connects and most sign-ins need no
-# typing at all. With OP_ITEM set, 1Password fills the ones that do.
+# identity-provider session carries across connects, and it starts hidden: a
+# sign-in the provider can complete on its own never shows a window. With
+# OP_ITEM set, 1Password fills the fields the provider asks for; the window
+# appears only when the person is needed.
 
 # Ask the portal where to send the sign-in. No credentials involved; this is
 # the same unauthenticated probe openconnect makes.
@@ -154,7 +156,7 @@ saml_login() {
     # we read is buffered in the pipe. The cookie never touches the filesystem.
     exec 9<>"$SAML_FIFO"
 
-    echo "Signing in to ${PORTAL}…" >&2
+    echo "Signing in to ${PORTAL}… (a window opens only if you are needed)" >&2
     # The 1Password settings are a reference and two flags; the window asks
     # `op` for each field itself, so no secret passes through here.
     GPN_SAML_FIFO="$SAML_FIFO" \
